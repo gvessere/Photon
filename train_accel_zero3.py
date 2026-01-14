@@ -49,11 +49,12 @@ def parse_args():
     # DeepSpeed config
     parser.add_argument("--ds_config", type=str, default="ds/zero3_fp16.json")
     
-    # Model config
-    parser.add_argument("--n_layers", type=int, default=6)
-    parser.add_argument("--n_heads", type=int, default=16)
-    parser.add_argument("--d_ff", type=int, default=5120)
-    parser.add_argument("--gradient_checkpointing", action="store_true")
+    # Model config - defaults sized for 2×T4 (15GB each)
+    # ~350M params fits comfortably with ZeRO-3 + CPU offload
+    parser.add_argument("--n_layers", type=int, default=4)
+    parser.add_argument("--n_heads", type=int, default=8)
+    parser.add_argument("--d_ff", type=int, default=2048)
+    parser.add_argument("--gradient_checkpointing", action="store_true", default=True)
     
     return parser.parse_args()
 

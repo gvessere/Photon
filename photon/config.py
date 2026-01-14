@@ -30,12 +30,12 @@ class PhotonConfig:
     R2: int = 4   # Number of conditioning tokens for level-2 decoder
     R1: int = 4   # Number of conditioning tokens for level-1 (token) decoder
     
-    # Transformer hyperparams
-    n_heads: int = 16
-    d_ff: int = 5120        # FFN hidden dimension
-    n_layers_enc: int = 6   # Encoder transformer layers per level
-    n_layers_dec: int = 6   # Decoder transformer layers per level
-    n_layers_latent_ar: int = 4  # Latent AR head layers
+    # Transformer hyperparams (defaults sized for 2×T4, ~350M params)
+    n_heads: int = 8
+    d_ff: int = 2048        # FFN hidden dimension
+    n_layers_enc: int = 4   # Encoder transformer layers per level
+    n_layers_dec: int = 4   # Decoder transformer layers per level
+    n_layers_latent_ar: int = 2  # Latent AR head layers
     
     # RoPE settings
     rope_theta: float = 10000.0
