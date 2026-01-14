@@ -26,7 +26,9 @@ def main():
     args = parser.parse_args()
     
     print(f"Loading checkpoint: {args.checkpoint}")
-    ckpt = torch.load(args.checkpoint, map_location=args.device)
+    # Add PhotonConfig to safe globals for PyTorch 2.6+
+    torch.serialization.add_safe_globals([PhotonConfig])
+    ckpt = torch.load(args.checkpoint, map_location=args.device, weights_only=True)
     
     # Get config
     if "config" in ckpt:
@@ -48,9 +50,19 @@ def main():
     
     # Load weights
     state_dict = ckpt.get("model", ckpt.get("model_state_dict", ckpt))
+    
     # Handle DeepSpeed wrapped state dict
     if any(k.startswith("module.") for k in state_dict.keys()):
         state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+    
+    # Check for empty ZeRO-3 shards (indicates bad checkpoint)
+    empty_count = sum(1 for v in state_dict.values() if v.numel() == 0)
+    if empty_count > 10:
+        print(f"ERROR: Checkpoint has {empty_count} empty tensors!")
+        print("This is a ZeRO-3 shard checkpoint, not a full model.")
+        print("You need to re-train with the updated training script that uses")
+        print("accelerator.get_state_dict() to gather shards before saving.")
+        return
     
     model.load_state_dict(state_dict, strict=False)
     model.to(args.device)

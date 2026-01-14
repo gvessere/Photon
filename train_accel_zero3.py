@@ -123,6 +123,8 @@ def main():
     model.train()
     it = iter(train_loader)
     running_loss = 0.0
+    running_loss_latent = 0.0
+    running_loss_lm = 0.0
     
     for step in range(1, args.steps + 1):
         # Get batch
@@ -142,12 +144,18 @@ def main():
             # when using accumulate() context manager
         
         running_loss += loss.item()
+        running_loss_latent += out.get("loss_latent", torch.tensor(0.0)).item()
+        running_loss_lm += out.get("loss_lm", torch.tensor(0.0)).item()
         
         # Logging
         if accelerator.is_main_process and step % args.log_every == 0:
             avg_loss = running_loss / args.log_every
-            accelerator.print(f"step {step:6d} | loss {avg_loss:.4f}")
+            avg_latent = running_loss_latent / args.log_every
+            avg_lm = running_loss_lm / args.log_every
+            accelerator.print(f"step {step:6d} | loss {avg_loss:.4f} | latent {avg_latent:.4f} | lm {avg_lm:.4f}")
             running_loss = 0.0
+            running_loss_latent = 0.0
+            running_loss_lm = 0.0
         
         # Evaluation
         if eval_loader is not None and step % args.eval_every == 0:
@@ -171,24 +179,22 @@ def main():
             
             model.train()
         
-        # Checkpointing
+        # Checkpointing - ZeRO-3 requires gathering sharded params
         if args.save_dir and step % args.save_every == 0:
             accelerator.wait_for_everyone()
+            os.makedirs(args.save_dir, exist_ok=True)
+            
+            # Use get_state_dict to gather all ZeRO-3 shards
+            unwrapped_model = accelerator.unwrap_model(model)
+            state_dict = accelerator.get_state_dict(model)
             
             if accelerator.is_main_process:
-                os.makedirs(args.save_dir, exist_ok=True)
-                
-                # Get unwrapped model for saving
-                unwrapped_model = accelerator.unwrap_model(model)
-                
-                # Save checkpoint
                 ckpt_path = os.path.join(args.save_dir, f"checkpoint_{step}.pt")
-                accelerator.save({
+                torch.save({
                     "step": step,
-                    "model_state_dict": unwrapped_model.state_dict(),
+                    "model": state_dict,
                     "config": cfg,
                 }, ckpt_path)
-                
                 accelerator.print(f"[save] Checkpoint saved to {ckpt_path}")
     
     accelerator.print("Training complete!")

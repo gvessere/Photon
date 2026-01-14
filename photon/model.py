@@ -683,7 +683,10 @@ class PhotonLM(nn.Module):
         # =====================================================================
         
         # Target: x1 grouped into chunks of C2
-        x1_chunks = x1.view(B, M2, cfg.C2, cfg.d_latent)  # [B, M2, C2, D]
+        # IMPORTANT: Detach targets to prevent encoder from learning to produce
+        # "easily predictable" latents. This forces the encoder to learn good
+        # representations rather than colluding with the decoder.
+        x1_chunks = x1.detach().view(B, M2, cfg.C2, cfg.d_latent)  # [B, M2, C2, D]
         
         # Previous level-2 latent (start token for g=0)
         prev_l2 = torch.cat([
@@ -728,7 +731,7 @@ class PhotonLM(nn.Module):
             # Predict x2[1:] from x2[:-1]
             ar_mean_shifted = ar_mean[:, :-1, :]
             ar_logvar_shifted = ar_logvar[:, :-1, :]
-            ar_target = x2[:, 1:, :]
+            ar_target = x2[:, 1:, :].detach()  # Detach target
             loss_latent_ar = self.latent_loss_fn(ar_mean_shifted, ar_logvar_shifted, ar_target)
             loss_latent = loss_latent + loss_latent_ar
         
