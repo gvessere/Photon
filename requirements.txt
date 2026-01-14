@@ -1,0 +1,17 @@
+# PHOTON Dependencies
+# Install with: pip install -r requirements.txt
+
+# Core
+torch>=2.0.0
+transformers>=4.30.0
+datasets>=2.14.0
+
+# Multi-GPU Training
+accelerate>=0.24.0
+deepspeed>=0.12.0
+
+# Optional: Better optimizers
+# bitsandbytes>=0.41.0  # For 8-bit optimizers (memory saving)
+
+# Development
+pytest>=7.0.0
