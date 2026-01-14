@@ -5,9 +5,6 @@ PHOTON Training Script with Accelerate + DeepSpeed ZeRO-3
 Launch with:
     accelerate launch --num_processes 2 train_accel_zero3.py
 
-Or with config:
-    accelerate launch --config_file accelerate_config.yaml train_accel_zero3.py
-
 This script enables multi-GPU training on 2×T4 GPUs with:
 - ZeRO-3 model sharding (fits large models)
 - fp16 mixed precision (T4 compatible, no bf16)
@@ -18,7 +15,6 @@ This script enables multi-GPU training on 2×T4 GPUs with:
 import os
 import math
 import argparse
-from typing import Optional
 
 import torch
 from torch.utils.data import DataLoader
@@ -41,8 +37,6 @@ def parse_args():
     
     # Training
     parser.add_argument("--steps", type=int, default=20000)
-    parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--weight_decay", type=float, default=0.1)
     parser.add_argument("--grad_accum", type=int, default=4)
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
     
@@ -119,18 +113,8 @@ def main():
         cfg.pad_token_id = tokenizer.pad_token_id
         cfg.vocab_size = len(tokenizer)
     
-    # Create optimizer (DeepSpeed will manage this with ZeRO-3)
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=args.lr,
-        betas=(0.9, 0.95),
-        weight_decay=args.weight_decay
-    )
-    
-    # Prepare with Accelerate
-    model, optimizer, train_loader = accelerator.prepare(
-        model, optimizer, train_loader
-    )
+    # Prepare model and dataloader - DeepSpeed handles optimizer internally
+    model, train_loader = accelerator.prepare(model, train_loader)
     
     accelerator.print("Starting training...")
     
@@ -147,20 +131,14 @@ def main():
             it = iter(train_loader)
             batch = next(it)
         
-        # Forward pass with autocast
-        with accelerator.autocast():
+        # Forward and backward with gradient accumulation
+        with accelerator.accumulate(model):
             out = model(**batch)
             loss = out["loss"]
-        
-        # Backward pass
-        accelerator.backward(loss)
-        
-        # Gradient accumulation
-        if step % args.grad_accum == 0:
-            if args.max_grad_norm > 0:
-                accelerator.clip_grad_norm_(model.parameters(), args.max_grad_norm)
-            optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
+            accelerator.backward(loss)
+            
+            # DeepSpeed handles optimizer.step() and zero_grad() internally
+            # when using accumulate() context manager
         
         running_loss += loss.item()
         
@@ -179,8 +157,7 @@ def main():
                 for i, eval_batch in enumerate(eval_loader):
                     if i >= 100:
                         break
-                    with accelerator.autocast():
-                        out = model(**eval_batch)
+                    out = model(**eval_batch)
                     total_loss += out["loss"].item() * eval_batch["labels"].numel()
                     total_tokens += eval_batch["labels"].numel()
             

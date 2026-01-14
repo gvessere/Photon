@@ -694,8 +694,8 @@ class PhotonLM(nn.Module):
         # Conditioning prefix from converter
         cond2 = self.dec_conv2(prev_l2)  # [B, M2, R2, D]
         
-        # Slot tokens for positions to predict
-        slots2 = torch.zeros(B, M2, cfg.C2, cfg.d_latent, device=input_ids.device)
+        # Slot tokens for positions to predict (match dtype of encoded latents)
+        slots2 = torch.zeros(B, M2, cfg.C2, cfg.d_latent, device=input_ids.device, dtype=x1.dtype)
         
         # Decoder input: [conditioning ; slots]
         dec_in2 = torch.cat([cond2, slots2], dim=2)  # [B, M2, R2+C2, D]
