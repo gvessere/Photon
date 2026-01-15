@@ -5,6 +5,9 @@ PHOTON Training Script with Accelerate + DeepSpeed ZeRO-3
 Launch with:
     accelerate launch --num_processes 2 train_accel_zero3.py
 
+Resume from checkpoint:
+    accelerate launch --num_processes 2 train_accel_zero3.py --resume checkpoints_photon/checkpoint_1000.pt
+
 This script enables multi-GPU training on 2×T4 GPUs with:
 - ZeRO-3 model sharding (fits large models)
 - fp16 mixed precision (T4 compatible, no bf16)
@@ -17,40 +20,25 @@ import math
 import argparse
 
 import torch
-from torch.utils.data import DataLoader
 from accelerate import Accelerator
 from accelerate.utils import DeepSpeedPlugin
 
 # Import PHOTON modules
 from photon import PhotonConfig, PhotonLM
-from photon.data import create_dataloaders, collate_fn
+from photon.data import create_dataloaders
+from train_utils import save_checkpoint, load_checkpoint, get_common_args
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train PHOTON with Accelerate + DeepSpeed")
     
-    # Data
-    parser.add_argument("--dataset", type=str, default="EleutherAI/the_pile_deduplicated")
-    parser.add_argument("--tokenizer", type=str, default="mistralai/Mistral-7B-v0.1")
+    # Add common args with photon-specific save dir
+    get_common_args(parser, default_save_dir="checkpoints_photon")
+    
+    # PHOTON-specific args
     parser.add_argument("--block_size", type=int, default=2048)
-    parser.add_argument("--batch_size", type=int, default=1)
-    
-    # Training
-    parser.add_argument("--steps", type=int, default=20000)
-    parser.add_argument("--grad_accum", type=int, default=4)
-    parser.add_argument("--max_grad_norm", type=float, default=1.0)
-    
-    # Logging
-    parser.add_argument("--log_every", type=int, default=50)
-    parser.add_argument("--eval_every", type=int, default=500)
-    parser.add_argument("--save_every", type=int, default=1000)
-    parser.add_argument("--save_dir", type=str, default="checkpoints")
-    
-    # DeepSpeed config
-    parser.add_argument("--ds_config", type=str, default="ds/zero3_fp16.json")
     
     # Model config - defaults sized for 2×T4 (15GB each)
-    # ~350M params fits comfortably with ZeRO-3 + CPU offload
     parser.add_argument("--n_layers", type=int, default=4)
     parser.add_argument("--n_heads", type=int, default=8)
     parser.add_argument("--d_ff", type=int, default=2048)
@@ -77,7 +65,7 @@ def main():
     accelerator.print("PHOTON Training with Accelerate + DeepSpeed ZeRO-3")
     accelerator.print(f"  Processes: {accelerator.num_processes}")
     accelerator.print(f"  Mixed precision: {accelerator.mixed_precision}")
-    accelerator.print(f"  Device: {accelerator.device}")
+    accelerator.print(f"  Batch size: {args.batch_size} x {args.grad_accum} x {accelerator.num_processes}")
     accelerator.print("=" * 60)
     
     # Create model config
@@ -93,8 +81,6 @@ def main():
     with accelerator.main_process_first():
         accelerator.print("Creating model...")
         model = PhotonLM(cfg)
-        
-        # Count parameters
         n_params = sum(p.numel() for p in model.parameters())
         accelerator.print(f"Model parameters: {n_params / 1e6:.2f}M")
     
@@ -108,14 +94,17 @@ def main():
             batch_size=args.batch_size,
             streaming=True,
         )
-        
-        # Update config with tokenizer info
         cfg.eos_token_id = tokenizer.eos_token_id
         cfg.pad_token_id = tokenizer.pad_token_id
         cfg.vocab_size = len(tokenizer)
     
-    # Prepare model and dataloader - DeepSpeed handles optimizer internally
+    # Prepare model and dataloader
     model, train_loader = accelerator.prepare(model, train_loader)
+    
+    # Resume from checkpoint if specified
+    start_step = 0
+    if args.resume:
+        start_step = load_checkpoint(accelerator, model, args.resume, PhotonConfig)
     
     accelerator.print("Starting training...")
     
@@ -126,7 +115,7 @@ def main():
     running_loss_latent = 0.0
     running_loss_lm = 0.0
     
-    for step in range(1, args.steps + 1):
+    for step in range(start_step + 1, args.steps + 1):
         # Get batch
         try:
             batch = next(it)
@@ -134,14 +123,11 @@ def main():
             it = iter(train_loader)
             batch = next(it)
         
-        # Forward and backward with gradient accumulation
+        # Forward and backward
         with accelerator.accumulate(model):
             out = model(**batch)
             loss = out["loss"]
             accelerator.backward(loss)
-            
-            # DeepSpeed handles optimizer.step() and zero_grad() internally
-            # when using accumulate() context manager
         
         running_loss += loss.item()
         running_loss_latent += out.get("loss_latent", torch.tensor(0.0)).item()
@@ -173,29 +159,20 @@ def main():
             if total_tokens > 0:
                 mean_loss = total_loss / total_tokens
                 ppl = math.exp(min(mean_loss, 100))
-                
-                if accelerator.is_main_process:
-                    accelerator.print(f"[eval] step {step} | loss {mean_loss:.4f} | ppl {ppl:.2f}")
+                accelerator.print(f"[eval] step {step} | loss {mean_loss:.4f} | ppl {ppl:.2f}")
             
             model.train()
         
-        # Checkpointing - ZeRO-3 requires gathering sharded params
+        # Checkpointing
         if args.save_dir and step % args.save_every == 0:
-            accelerator.wait_for_everyone()
-            os.makedirs(args.save_dir, exist_ok=True)
-            
-            # Use get_state_dict to gather all ZeRO-3 shards
-            unwrapped_model = accelerator.unwrap_model(model)
-            state_dict = accelerator.get_state_dict(model)
-            
-            if accelerator.is_main_process:
-                ckpt_path = os.path.join(args.save_dir, f"checkpoint_{step}.pt")
-                torch.save({
-                    "step": step,
-                    "model": state_dict,
-                    "config": cfg,
-                }, ckpt_path)
-                accelerator.print(f"[save] Checkpoint saved to {ckpt_path}")
+            save_checkpoint(
+                accelerator=accelerator,
+                model=model,
+                config=cfg,
+                step=step,
+                save_dir=args.save_dir,
+                prefix="photon"
+            )
     
     accelerator.print("Training complete!")
 
