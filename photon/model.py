@@ -499,9 +499,12 @@ class GaussianLatentLoss(nn.Module):
         
         if mask is not None:
             nll = nll * mask
-            return nll.sum() / mask.sum().clamp(min=1)
+            loss = nll.sum() / mask.sum().clamp(min=1)
+        else:
+            loss = nll.mean()
         
-        return nll.mean()
+        # Clamp to non-negative to prevent gaming with extreme logvar
+        return loss.clamp(min=0.0)
 
 
 # =============================================================================
@@ -689,9 +692,10 @@ class PhotonLM(nn.Module):
         x1_chunks = x1.detach().view(B, M2, cfg.C2, cfg.d_latent)  # [B, M2, C2, D]
         
         # Previous level-2 latent (start token for g=0)
+        # DETACH x2 conditioning to prevent encoder-decoder collusion
         prev_l2 = torch.cat([
             self.start_latent_l2.view(1, 1, -1).expand(B, 1, -1),
-            x2[:, :-1, :],
+            x2[:, :-1, :].detach(),
         ], dim=1)  # [B, M2, D]
         
         # Conditioning prefix from converter
@@ -744,9 +748,10 @@ class PhotonLM(nn.Module):
         tok_emb = self.dec_embed(tokens)         # [B, M1, C1, D]
         
         # Previous level-1 latent
+        # DETACH x1 conditioning to prevent encoder-decoder collusion
         prev_l1 = torch.cat([
             self.start_latent_l1.view(1, 1, -1).expand(B, 1, -1),
-            x1[:, :-1, :],
+            x1[:, :-1, :].detach(),
         ], dim=1)  # [B, M1, D]
         
         # Conditioning prefix
