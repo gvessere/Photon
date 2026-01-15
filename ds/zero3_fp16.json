@@ -1,9 +1,9 @@
 {
   "fp16": {
     "enabled": true,
-    "loss_scale": 256,
-    "loss_scale_window": 1000,
-    "initial_scale_power": 16,
+    "loss_scale": 0,
+    "loss_scale_window": 500,
+    "initial_scale_power": 15,
     "hysteresis": 2,
     "min_loss_scale": 1
   },
