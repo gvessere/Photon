@@ -28,10 +28,12 @@ def save_checkpoint(
     config: Any,
     step: int,
     save_dir: str,
-    prefix: str = "checkpoint"
+    prefix: str = "checkpoint",
+    keep_last: int = 5,
 ) -> Optional[str]:
     """
     Save checkpoint with ZeRO-3 compatible weight gathering.
+    Automatically removes old checkpoints to keep only the last N.
     
     Args:
         accelerator: Accelerate instance
@@ -40,6 +42,7 @@ def save_checkpoint(
         step: Current training step
         save_dir: Directory to save to
         prefix: Filename prefix
+        keep_last: Number of recent checkpoints to keep (0 = keep all)
     
     Returns:
         Path to saved checkpoint (on main process) or None
@@ -59,8 +62,46 @@ def save_checkpoint(
             "config": config,
         }, ckpt_path)
         accelerator.print(f"[save] Checkpoint saved to {ckpt_path}")
+        
+        # Remove old checkpoints if keep_last > 0
+        if keep_last > 0:
+            _cleanup_old_checkpoints(save_dir, prefix, keep_last, accelerator)
     
     return ckpt_path
+
+
+def _cleanup_old_checkpoints(
+    save_dir: str,
+    prefix: str,
+    keep_last: int,
+    accelerator: Accelerator,
+):
+    """Remove old checkpoints, keeping only the most recent ones."""
+    import glob
+    import re
+    
+    # Find all checkpoints with this prefix
+    pattern = os.path.join(save_dir, f"{prefix}_*.pt")
+    checkpoints = glob.glob(pattern)
+    
+    if len(checkpoints) <= keep_last:
+        return
+    
+    # Extract step numbers and sort
+    def get_step(path):
+        match = re.search(rf"{prefix}_(\d+)\.pt$", path)
+        return int(match.group(1)) if match else 0
+    
+    checkpoints_sorted = sorted(checkpoints, key=get_step, reverse=True)
+    
+    # Remove old ones
+    to_remove = checkpoints_sorted[keep_last:]
+    for old_ckpt in to_remove:
+        try:
+            os.remove(old_ckpt)
+            accelerator.print(f"[cleanup] Removed old checkpoint: {os.path.basename(old_ckpt)}")
+        except OSError as e:
+            accelerator.print(f"[cleanup] Failed to remove {old_ckpt}: {e}")
 
 
 def load_checkpoint(
@@ -125,6 +166,8 @@ def get_common_args(parser, default_save_dir: str = "checkpoints"):
     parser.add_argument("--eval_every", type=int, default=500)
     parser.add_argument("--save_every", type=int, default=1000)
     parser.add_argument("--save_dir", type=str, default=default_save_dir)
+    parser.add_argument("--keep_last", type=int, default=5,
+                        help="Keep only the last N checkpoints (0 = keep all)")
     
     # DeepSpeed
     parser.add_argument("--ds_config", type=str, default="ds/zero3_fp16.json")

@@ -191,7 +191,8 @@ def main():
                 config=cfg,
                 step=step,
                 save_dir=args.save_dir,
-                prefix="photon"
+                prefix="photon",
+                keep_last=args.keep_last,
             )
     
     # Finish wandb
