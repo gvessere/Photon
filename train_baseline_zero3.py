@@ -20,7 +20,10 @@ from accelerate.utils import DeepSpeedPlugin
 
 from baseline import BaselineConfig, BaselineLM
 from photon.data import create_dataloaders
-from train_utils import save_checkpoint, load_checkpoint, get_common_args
+from train_utils import (
+    save_checkpoint, load_checkpoint, get_common_args,
+    init_wandb, log_wandb, finish_wandb
+)
 
 
 def parse_args():
@@ -77,6 +80,9 @@ def main():
         n_params = sum(p.numel() for p in model.parameters())
         accelerator.print(f"Model parameters: {n_params / 1e6:.2f}M")
     
+    # Initialize wandb
+    wandb_active = init_wandb(accelerator, args, "baseline", cfg, n_params)
+    
     # Load dataset
     with accelerator.main_process_first():
         accelerator.print("Loading dataset...")
@@ -126,6 +132,10 @@ def main():
         if accelerator.is_main_process and step % args.log_every == 0:
             avg_loss = running_loss / args.log_every
             accelerator.print(f"step {step:6d} | loss {avg_loss:.4f}")
+            
+            # Log to wandb
+            log_wandb(accelerator, {"train/loss": avg_loss}, step, wandb_active)
+            
             running_loss = 0.0
         
         # Checkpointing
@@ -138,6 +148,9 @@ def main():
                 save_dir=args.save_dir,
                 prefix="baseline"
             )
+    
+    # Finish wandb
+    finish_wandb(accelerator, wandb_active)
     
     accelerator.print("Training complete!")
 

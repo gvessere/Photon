@@ -4,6 +4,7 @@ Shared training utilities for PHOTON and Baseline models.
 Common functionality:
 - Checkpoint saving (ZeRO-3 compatible)
 - Checkpoint loading/resumption
+- Weights & Biases logging
 - Training loop helpers
 """
 
@@ -12,6 +13,13 @@ from typing import Optional, Any, Dict
 
 import torch
 from accelerate import Accelerator
+
+# Optional wandb import
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
 
 
 def save_checkpoint(
@@ -125,4 +133,96 @@ def get_common_args(parser, default_save_dir: str = "checkpoints"):
     parser.add_argument("--resume", type=str, default=None, 
                         help="Path to checkpoint to resume from")
     
+    # Weights & Biases
+    parser.add_argument("--wandb", action="store_true", default=False,
+                        help="Enable Weights & Biases logging")
+    parser.add_argument("--wandb_project", type=str, default="photon",
+                        help="W&B project name")
+    parser.add_argument("--wandb_run", type=str, default=None,
+                        help="W&B run name (auto-generated if not specified)")
+    
     return parser
+
+
+def init_wandb(
+    accelerator: Accelerator,
+    args,
+    model_name: str,
+    config: Any,
+    n_params: int,
+) -> bool:
+    """
+    Initialize Weights & Biases logging.
+    
+    Args:
+        accelerator: Accelerate instance
+        args: Parsed arguments
+        model_name: Name of the model (e.g., "photon", "baseline")
+        config: Model config dataclass
+        n_params: Number of model parameters
+    
+    Returns:
+        True if wandb is active, False otherwise
+    """
+    if not args.wandb:
+        return False
+    
+    if not WANDB_AVAILABLE:
+        accelerator.print("WARNING: wandb not installed. Run: pip install wandb")
+        return False
+    
+    if accelerator.is_main_process:
+        # Build config dict for wandb
+        wandb_config = {
+            "model": model_name,
+            "n_params": n_params,
+            "batch_size": args.batch_size,
+            "grad_accum": args.grad_accum,
+            "effective_batch": args.batch_size * args.grad_accum * accelerator.num_processes,
+            "steps": args.steps,
+            "dataset": args.dataset,
+        }
+        
+        # Add model config fields
+        if hasattr(config, "__dataclass_fields__"):
+            for field in config.__dataclass_fields__:
+                wandb_config[f"model_{field}"] = getattr(config, field)
+        
+        run_name = args.wandb_run or f"{model_name}-{n_params // 1_000_000}M"
+        
+        wandb.init(
+            project=args.wandb_project,
+            name=run_name,
+            config=wandb_config,
+            resume="allow",
+        )
+        accelerator.print(f"[wandb] Logging to project '{args.wandb_project}', run '{run_name}'")
+    
+    return True
+
+
+def log_wandb(
+    accelerator: Accelerator,
+    metrics: Dict[str, float],
+    step: int,
+    wandb_active: bool,
+):
+    """
+    Log metrics to Weights & Biases.
+    
+    Args:
+        accelerator: Accelerate instance
+        metrics: Dictionary of metric names to values
+        step: Current training step
+        wandb_active: Whether wandb is active
+    """
+    if not wandb_active or not accelerator.is_main_process:
+        return
+    
+    wandb.log(metrics, step=step)
+
+
+def finish_wandb(accelerator: Accelerator, wandb_active: bool):
+    """Finish wandb run."""
+    if wandb_active and accelerator.is_main_process:
+        wandb.finish()

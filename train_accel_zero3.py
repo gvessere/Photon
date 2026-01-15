@@ -26,7 +26,10 @@ from accelerate.utils import DeepSpeedPlugin
 # Import PHOTON modules
 from photon import PhotonConfig, PhotonLM
 from photon.data import create_dataloaders
-from train_utils import save_checkpoint, load_checkpoint, get_common_args
+from train_utils import (
+    save_checkpoint, load_checkpoint, get_common_args,
+    init_wandb, log_wandb, finish_wandb
+)
 
 
 def parse_args():
@@ -84,6 +87,9 @@ def main():
         n_params = sum(p.numel() for p in model.parameters())
         accelerator.print(f"Model parameters: {n_params / 1e6:.2f}M")
     
+    # Initialize wandb
+    wandb_active = init_wandb(accelerator, args, "photon", cfg, n_params)
+    
     # Create dataloaders
     with accelerator.main_process_first():
         accelerator.print("Loading dataset...")
@@ -139,6 +145,14 @@ def main():
             avg_latent = running_loss_latent / args.log_every
             avg_lm = running_loss_lm / args.log_every
             accelerator.print(f"step {step:6d} | loss {avg_loss:.4f} | latent {avg_latent:.4f} | lm {avg_lm:.4f}")
+            
+            # Log to wandb
+            log_wandb(accelerator, {
+                "train/loss": avg_loss,
+                "train/loss_latent": avg_latent,
+                "train/loss_lm": avg_lm,
+            }, step, wandb_active)
+            
             running_loss = 0.0
             running_loss_latent = 0.0
             running_loss_lm = 0.0
@@ -160,6 +174,12 @@ def main():
                 mean_loss = total_loss / total_tokens
                 ppl = math.exp(min(mean_loss, 100))
                 accelerator.print(f"[eval] step {step} | loss {mean_loss:.4f} | ppl {ppl:.2f}")
+                
+                # Log to wandb
+                log_wandb(accelerator, {
+                    "eval/loss": mean_loss,
+                    "eval/ppl": ppl,
+                }, step, wandb_active)
             
             model.train()
         
@@ -173,6 +193,9 @@ def main():
                 save_dir=args.save_dir,
                 prefix="photon"
             )
+    
+    # Finish wandb
+    finish_wandb(accelerator, wandb_active)
     
     accelerator.print("Training complete!")
 
