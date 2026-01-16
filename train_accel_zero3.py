@@ -47,6 +47,15 @@ def parse_args():
     parser.add_argument("--d_ff", type=int, default=2048)
     parser.add_argument("--gradient_checkpointing", action="store_true", default=True)
     
+    # Loss weighting (Paper Eq. 7)
+    parser.add_argument("--lambda_lm", type=float, default=1.0, help="Weight for LM loss")
+    parser.add_argument("--lambda_ctx", type=float, default=1.0, help="Weight for next-context loss")
+    parser.add_argument("--lambda_rec", type=float, default=1.0, help="Weight for reconstruction loss")
+    
+    # Conditioning detach (True = prevent collusion, False = joint encoder-decoder learning)
+    parser.add_argument("--no_detach_conditioning", action="store_true",
+                       help="Don't detach conditioning paths (allow encoder-decoder gradient flow)")
+    
     return parser.parse_args()
 
 
@@ -78,6 +87,12 @@ def main():
         n_heads=args.n_heads,
         d_ff=args.d_ff,
         gradient_checkpointing=args.gradient_checkpointing,
+        # Loss weights (Paper Eq. 7)
+        lambda_lm=args.lambda_lm,
+        lambda_ctx=args.lambda_ctx,
+        lambda_rec=args.lambda_rec,
+        # Conditioning detach behavior
+        detach_conditioning=not args.no_detach_conditioning,
     )
     
     # Create model
@@ -118,7 +133,8 @@ def main():
     model.train()
     it = iter(train_loader)
     running_loss = 0.0
-    running_loss_latent = 0.0
+    running_loss_rec = 0.0
+    running_loss_ctx = 0.0
     running_loss_lm = 0.0
     
     for step in range(start_step + 1, args.steps + 1):
@@ -136,25 +152,29 @@ def main():
             accelerator.backward(loss)
         
         running_loss += loss.item()
-        running_loss_latent += out.get("loss_latent", torch.tensor(0.0)).item()
+        running_loss_rec += out.get("loss_rec", torch.tensor(0.0)).item()
+        running_loss_ctx += out.get("loss_ctx", torch.tensor(0.0)).item()
         running_loss_lm += out.get("loss_lm", torch.tensor(0.0)).item()
         
         # Logging
         if accelerator.is_main_process and step % args.log_every == 0:
             avg_loss = running_loss / args.log_every
-            avg_latent = running_loss_latent / args.log_every
+            avg_rec = running_loss_rec / args.log_every
+            avg_ctx = running_loss_ctx / args.log_every
             avg_lm = running_loss_lm / args.log_every
-            accelerator.print(f"step {step:6d} | loss {avg_loss:.4f} | latent {avg_latent:.4f} | lm {avg_lm:.4f}")
+            accelerator.print(f"step {step:6d} | loss {avg_loss:.4f} | rec {avg_rec:.4f} | ctx {avg_ctx:.4f} | lm {avg_lm:.4f}")
             
             # Log to wandb
             log_wandb(accelerator, {
                 "train/loss": avg_loss,
-                "train/loss_latent": avg_latent,
+                "train/loss_rec": avg_rec,
+                "train/loss_ctx": avg_ctx,
                 "train/loss_lm": avg_lm,
             }, step, wandb_active)
             
             running_loss = 0.0
-            running_loss_latent = 0.0
+            running_loss_rec = 0.0
+            running_loss_ctx = 0.0
             running_loss_lm = 0.0
         
         # Evaluation

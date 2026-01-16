@@ -41,13 +41,19 @@ class PhotonConfig:
     rope_theta: float = 10000.0
     rope_dim: Optional[int] = None  # If None, use d_latent // n_heads
     
-    # Loss weighting
-    lambda_latent: float = 1.0
-    lambda_lm: float = 1.0
+    # Loss weighting (Paper Eq. 7: L = L_LM + λ_ctx * L_ctx + λ_rec * L_rec)
+    lambda_lm: float = 1.0      # Weight for token prediction loss
+    lambda_ctx: float = 1.0     # Weight for next-context prediction (L2 AR)
+    lambda_rec: float = 1.0     # Weight for reconstruction loss (L2→L1 prediction)
     
     # Training settings
     gradient_checkpointing: bool = False
     use_sdpa: bool = True  # Use scaled_dot_product_attention
+    
+    # Detach conditioning paths to prevent encoder-decoder collusion
+    # Set to False to allow gradients to flow from decoder back to encoder
+    # (closer to paper's "reconstruction" but risks mode collapse)
+    detach_conditioning: bool = True
     
     # EOS token id (set during data loading)
     eos_token_id: Optional[int] = None

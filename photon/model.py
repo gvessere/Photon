@@ -616,20 +616,21 @@ class PhotonLM(nn.Module):
         M1 = x1.size(1)  # Number of level-1 units
         
         # =====================================================================
-        # (A) Level-2 -> Level-1 latent reconstruction loss
+        # (A) Level-2 -> Level-1 latent reconstruction loss (L_rec in paper)
         # =====================================================================
         
         # Target: x1 grouped into chunks of C2
-        # IMPORTANT: Detach targets to prevent encoder from learning to produce
-        # "easily predictable" latents. This forces the encoder to learn good
-        # representations rather than colluding with the decoder.
+        # Always detach TARGET to prevent encoder from learning "easy" latents
         x1_chunks = x1.detach().view(B, M2, cfg.C2, cfg.d_latent)  # [B, M2, C2, D]
         
         # Previous level-2 latent (start token for g=0)
-        # DETACH x2 conditioning to prevent encoder-decoder collusion
+        # Optionally detach conditioning based on config
+        x2_prev = x2[:, :-1, :]
+        if cfg.detach_conditioning:
+            x2_prev = x2_prev.detach()
         prev_l2 = torch.cat([
             self.start_latent_l2.view(1, 1, -1).expand(B, 1, -1),
-            x2[:, :-1, :].detach(),
+            x2_prev,
         ], dim=1)  # [B, M2, D]
         
         # Conditioning prefix from input converter
@@ -650,21 +651,21 @@ class PhotonLM(nn.Module):
         pred_l1 = self.dec_proj2_out(pred_h)  # [B*M2, C2, D]
         pred_l1 = pred_l1.view(B, M2, cfg.C2, cfg.d_latent)
         
-        # Latent loss (MSE)
-        loss_latent = F.mse_loss(pred_l1, x1_chunks)
+        # Reconstruction loss L_rec (MSE between decoder prediction and encoder output)
+        loss_rec = F.mse_loss(pred_l1, x1_chunks)
         
         # =====================================================================
-        # (B) Level-2 AR loss (train the latent AR head)
+        # (B) Next-context prediction loss (L_ctx in paper)
         # =====================================================================
         
         # Train AR head to predict x2[g] from x2[<g]
+        loss_ctx = torch.tensor(0.0, device=input_ids.device, dtype=x1.dtype)
         if M2 > 1:
             ar_pred = self.latent_ar_head(x2)
             # Predict x2[1:] from x2[:-1]
             ar_pred_shifted = ar_pred[:, :-1, :]
-            ar_target = x2[:, 1:, :].detach()  # Detach target
-            loss_latent_ar = F.mse_loss(ar_pred_shifted, ar_target)
-            loss_latent = loss_latent + loss_latent_ar
+            ar_target = x2[:, 1:, :].detach()  # Always detach target
+            loss_ctx = F.mse_loss(ar_pred_shifted, ar_target)
         
         # =====================================================================
         # (C) Token LM loss within chunks
@@ -674,11 +675,14 @@ class PhotonLM(nn.Module):
         tokens = input_ids.view(B, M1, cfg.C1)  # [B, M1, C1]
         tok_emb = self.dec_embed(tokens)         # [B, M1, C1, D]
         
-        # Previous level-1 latent
-        # DETACH x1 conditioning to prevent encoder-decoder collusion
+        # Previous level-1 latent (start token for first chunk)
+        # Optionally detach conditioning based on config
+        x1_prev = x1[:, :-1, :]
+        if cfg.detach_conditioning:
+            x1_prev = x1_prev.detach()
         prev_l1 = torch.cat([
             self.start_latent_l1.view(1, 1, -1).expand(B, 1, -1),
-            x1[:, :-1, :].detach(),
+            x1_prev,
         ], dim=1)  # [B, M1, D]
         
         # Conditioning prefix
@@ -716,14 +720,15 @@ class PhotonLM(nn.Module):
                 ignore_index=-100
             )
         
-        # Combined loss
-        loss = cfg.lambda_latent * loss_latent
+        # Combined loss (Paper Eq. 7: L = L_LM + λ_ctx * L_ctx + λ_rec * L_rec)
+        loss = cfg.lambda_rec * loss_rec + cfg.lambda_ctx * loss_ctx
         if loss_lm is not None:
             loss = loss + cfg.lambda_lm * loss_lm
         
         out = {
             "loss": loss,
-            "loss_latent": loss_latent,
+            "loss_rec": loss_rec,    # Reconstruction loss (L2→L1)
+            "loss_ctx": loss_ctx,    # Next-context prediction (AR)
             "logits": logits,
         }
         if loss_lm is not None:
