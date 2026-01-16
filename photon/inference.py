@@ -25,7 +25,6 @@ def generate_photon(
     top_k: int = 50,
     top_p: float = 0.9,
     use_latent_ar: bool = True,
-    latent_temperature: float = 0.8,
     eos_token_id: Optional[int] = None,
 ) -> torch.Tensor:
     """
@@ -33,7 +32,7 @@ def generate_photon(
     
     True top-down generation:
     1. Encode prompt to get initial latents
-    2. Use LatentARHead to generate new L2 latents (no re-encoding!)
+    2. Use LatentARHead to generate new L2 latents (deterministic)
     3. Decode L2 -> L1 -> tokens through converters
     
     Args:
@@ -44,7 +43,6 @@ def generate_photon(
         top_k: Top-k sampling (0 to disable)
         top_p: Top-p (nucleus) sampling (1.0 to disable)
         use_latent_ar: Use AR head for latents (True = no re-encoding)
-        latent_temperature: Temperature for latent sampling
         eos_token_id: Stop generation on this token
     
     Returns:
@@ -86,7 +84,6 @@ def generate_photon(
             temperature=temperature,
             top_k=top_k,
             top_p=top_p,
-            latent_temperature=latent_temperature,
         )  # [B, C1*C2]
         
         new_tokens.append(block_tokens)
@@ -100,8 +97,8 @@ def generate_photon(
         
         # Update latents for next block
         if use_latent_ar:
-            # Generate next L2 latent using AR head
-            next_l2 = model.latent_ar_head.sample(l2_history, temperature=latent_temperature)
+            # Generate next L2 latent using AR head (deterministic)
+            next_l2 = model.latent_ar_head.predict_next(l2_history)
             l2_history = torch.cat([l2_history, next_l2.unsqueeze(1)], dim=1)
             prev_l2 = next_l2
             
@@ -129,14 +126,13 @@ def generate_one_block(
     temperature: float = 1.0,
     top_k: int = 50,
     top_p: float = 0.9,
-    latent_temperature: float = 0.8,
 ) -> torch.Tensor:
     """
     Generate one full block of C1*C2 tokens.
     
     Uses the hierarchical structure:
-    1. If l2_history provided, use AR head to predict L2 latents
-    2. Decode L2 -> C2 L1 latents
+    1. If l2_history provided, use AR head to predict L2 latents (deterministic)
+    2. Decode L2 -> C2 L1 latents (deterministic)
     3. Decode each L1 -> C1 tokens
     
     Args:
@@ -147,7 +143,6 @@ def generate_one_block(
         temperature: Token sampling temperature
         top_k: Top-k sampling
         top_p: Top-p sampling
-        latent_temperature: Latent sampling temperature
     
     Returns:
         [B, C1*C2] generated tokens
@@ -178,17 +173,9 @@ def generate_one_block(
         
         dec_out = model.dec_ctx2(dec_in, is_causal=True)
         
-        # Predict L1 latent
+        # Predict L1 latent (deterministic)
         h = dec_out[:, -1, :]  # [B, D]
-        mean = model.latent_mean_head(h)
-        logvar = model.latent_logvar_head(h)
-        
-        # Sample
-        if latent_temperature == 0:
-            next_l1 = mean
-        else:
-            std = torch.exp(0.5 * logvar) * latent_temperature
-            next_l1 = mean + std * torch.randn_like(std)
+        next_l1 = model.latent_pred_head(h)
         
         l1_latents.append(next_l1)
         current_l1 = next_l1
@@ -303,8 +290,8 @@ def decode_l2_to_l1_latent(model: PhotonLM, l2_latent: torch.Tensor) -> torch.Te
     dec_out = model.dec_ctx2(dec_in, is_causal=True)
     h = dec_out[:, -1, :]  # [B, D]
     
-    # Return mean prediction
-    return model.latent_mean_head(h)
+    # Return predicted L1 latent
+    return model.latent_pred_head(h)
 
 
 def sample_token(

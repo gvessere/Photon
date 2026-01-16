@@ -415,96 +415,35 @@ class LatentARHead(nn.Module):
             gradient_checkpointing=False  # Small model, no need
         )
         
-        # Prediction heads for Gaussian parameterization
-        self.mean_head = nn.Linear(d_latent, d_latent, bias=False)
-        self.logvar_head = nn.Linear(d_latent, d_latent, bias=False)
-        
-        # Initialize logvar to predict small variance initially
-        nn.init.zeros_(self.logvar_head.weight)
+        # Prediction head (deterministic, trained with MSE)
+        self.pred_head = nn.Linear(d_latent, d_latent, bias=False)
     
-    def forward(self, latent_seq: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, latent_seq: torch.Tensor) -> torch.Tensor:
         """
         Args:
             latent_seq: [B, T, d_latent] sequence of latents
         
         Returns:
-            mean: [B, T, d_latent] predicted mean for next latent
-            logvar: [B, T, d_latent] predicted log variance
+            pred: [B, T, d_latent] predicted next latent
         """
         h = self.transformer(latent_seq, is_causal=True)
-        mean = self.mean_head(h)
-        logvar = self.logvar_head(h)
-        return mean, logvar
+        return self.pred_head(h)
     
-    def sample(self, prev_latent: torch.Tensor, temperature: float = 1.0) -> torch.Tensor:
+    def predict_next(self, prev_latent: torch.Tensor) -> torch.Tensor:
         """
-        Sample next latent given previous latent.
+        Predict next latent given previous latent(s).
         
         Args:
             prev_latent: [B, d_latent] or [B, T, d_latent]
         
         Returns:
-            [B, d_latent] sampled next latent
+            [B, d_latent] predicted next latent
         """
         if prev_latent.dim() == 2:
             prev_latent = prev_latent.unsqueeze(1)
         
-        mean, logvar = self.forward(prev_latent)
-        mean = mean[:, -1, :]      # [B, d_latent]
-        logvar = logvar[:, -1, :]  # [B, d_latent]
-        
-        if temperature == 0:
-            return mean
-        
-        std = torch.exp(0.5 * logvar) * temperature
-        return mean + std * torch.randn_like(std)
-
-
-# =============================================================================
-# Gaussian NLL Loss for Latents
-# =============================================================================
-
-class GaussianLatentLoss(nn.Module):
-    """
-    Gaussian negative log-likelihood loss for latent prediction.
-    
-    NLL = 0.5 * (log_var + (pred - target)^2 / exp(log_var))
-    
-    With learned variance, this is more expressive than MSE.
-    """
-    
-    def __init__(self, min_logvar: float = -10.0, max_logvar: float = 10.0):
-        super().__init__()
-        self.min_logvar = min_logvar
-        self.max_logvar = max_logvar
-    
-    def forward(self, pred_mean: torch.Tensor, pred_logvar: torch.Tensor,
-                target: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """
-        Args:
-            pred_mean: [B, ...] predicted mean
-            pred_logvar: [B, ...] predicted log variance
-            target: [B, ...] target values
-            mask: Optional [B, ...] mask (1 = valid, 0 = ignore)
-        
-        Returns:
-            Scalar loss
-        """
-        # Clamp logvar for stability
-        logvar = torch.clamp(pred_logvar, self.min_logvar, self.max_logvar)
-        
-        # Gaussian NLL
-        var = torch.exp(logvar)
-        nll = 0.5 * (logvar + (pred_mean - target) ** 2 / var)
-        
-        if mask is not None:
-            nll = nll * mask
-            loss = nll.sum() / mask.sum().clamp(min=1)
-        else:
-            loss = nll.mean()
-        
-        # Clamp to non-negative to prevent gaming with extreme logvar
-        return loss.clamp(min=0.0)
+        pred = self.forward(prev_latent)
+        return pred[:, -1, :]  # [B, d_latent]
 
 
 # =============================================================================
@@ -517,10 +456,10 @@ class PhotonLM(nn.Module):
     
     Complete implementation with:
     - Two-level latent hierarchy (tokens -> L1 -> L2)
-    - Top-level latent AR generation
+    - Top-level latent AR generation (deterministic)
     - Table 7 matched converters
     - RoPE at all levels
-    - Gaussian NLL latent loss
+    - MSE latent loss (simpler, more stable)
     - Gradient checkpointing support
     """
     
@@ -587,10 +526,8 @@ class PhotonLM(nn.Module):
             gradient_checkpointing=cfg.gradient_checkpointing
         )
         
-        # Latent prediction heads (for Gaussian loss)
-        self.latent_mean_head = nn.Linear(cfg.d_latent, cfg.d_latent, bias=False)
-        self.latent_logvar_head = nn.Linear(cfg.d_latent, cfg.d_latent, bias=False)
-        nn.init.zeros_(self.latent_logvar_head.weight)
+        # Latent prediction head (deterministic, trained with MSE)
+        self.latent_pred_head = nn.Linear(cfg.d_latent, cfg.d_latent, bias=False)
         
         # Level 1 -> Token decoder
         self.dec_conv1 = TableMatchedConverter(
@@ -613,9 +550,6 @@ class PhotonLM(nn.Module):
         
         # Tie embeddings
         self.lm_head.weight = self.dec_embed.weight
-        
-        # Loss modules
-        self.latent_loss_fn = GaussianLatentLoss()
         
         # Initialize weights
         self.apply(self._init_weights)
@@ -712,18 +646,12 @@ class PhotonLM(nn.Module):
         dec_out2 = self.dec_ctx2(dec_in2, is_causal=True)  # [B*M2, R2+C2, D]
         pred_h = dec_out2[:, cfg.R2:, :]  # [B*M2, C2, D]
         
-        # Gaussian prediction
-        pred_mean = self.latent_mean_head(pred_h)      # [B*M2, C2, D]
-        pred_logvar = self.latent_logvar_head(pred_h)  # [B*M2, C2, D]
+        # Predict L1 latents (deterministic)
+        pred_l1 = self.latent_pred_head(pred_h)  # [B*M2, C2, D]
+        pred_l1 = pred_l1.view(B, M2, cfg.C2, cfg.d_latent)
         
-        pred_mean = pred_mean.view(B, M2, cfg.C2, cfg.d_latent)
-        pred_logvar = pred_logvar.view(B, M2, cfg.C2, cfg.d_latent)
-        
-        # Latent loss
-        if cfg.latent_loss_type == "gaussian":
-            loss_latent = self.latent_loss_fn(pred_mean, pred_logvar, x1_chunks)
-        else:
-            loss_latent = F.mse_loss(pred_mean, x1_chunks)
+        # Latent loss (MSE)
+        loss_latent = F.mse_loss(pred_l1, x1_chunks)
         
         # =====================================================================
         # (B) Level-2 AR loss (train the latent AR head)
@@ -731,12 +659,11 @@ class PhotonLM(nn.Module):
         
         # Train AR head to predict x2[g] from x2[<g]
         if M2 > 1:
-            ar_mean, ar_logvar = self.latent_ar_head(x2)
+            ar_pred = self.latent_ar_head(x2)
             # Predict x2[1:] from x2[:-1]
-            ar_mean_shifted = ar_mean[:, :-1, :]
-            ar_logvar_shifted = ar_logvar[:, :-1, :]
+            ar_pred_shifted = ar_pred[:, :-1, :]
             ar_target = x2[:, 1:, :].detach()  # Detach target
-            loss_latent_ar = self.latent_loss_fn(ar_mean_shifted, ar_logvar_shifted, ar_target)
+            loss_latent_ar = F.mse_loss(ar_pred_shifted, ar_target)
             loss_latent = loss_latent + loss_latent_ar
         
         # =====================================================================

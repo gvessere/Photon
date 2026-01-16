@@ -49,9 +49,6 @@ class PhotonConfig:
     gradient_checkpointing: bool = False
     use_sdpa: bool = True  # Use scaled_dot_product_attention
     
-    # Latent loss type: "mse" (stable) or "gaussian" (with learned variance)
-    latent_loss_type: str = "mse"
-    
     # EOS token id (set during data loading)
     eos_token_id: Optional[int] = None
     pad_token_id: Optional[int] = None
