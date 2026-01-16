@@ -1,10 +1,16 @@
 #!/usr/bin/env python
 """
-Quick generation test for PHOTON
+Generation test for PHOTON and Baseline models
 
 Usage:
+    # PHOTON
     python test_generate.py --checkpoint checkpoints_photon/photon_1000.pt
-    python test_generate.py --checkpoint checkpoints_photon/photon_1000.pt --cpu  # Low memory
+    
+    # Baseline
+    python test_generate.py --checkpoint checkpoints_baseline/baseline_1000.pt
+    
+    # Low memory mode
+    python test_generate.py --checkpoint checkpoints_photon/photon_1000.pt --cpu
 """
 
 import argparse
@@ -15,11 +21,13 @@ import sys
 sys.path.insert(0, '.')
 
 from photon import PhotonConfig, PhotonLM
+from baseline import BaselineConfig, BaselineLM
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", type=str, default="checkpoints_photon/photon_1000.pt")
+    parser.add_argument("--checkpoint", type=str, required=True,
+                        help="Path to checkpoint (auto-detects model type)")
     parser.add_argument("--prompt", type=str, default="The meaning of life is")
     parser.add_argument("--max_tokens", type=int, default=64)
     parser.add_argument("--temperature", type=float, default=0.8)
@@ -33,12 +41,36 @@ def main():
     print(f"Device: {device}, dtype: {dtype}")
     print(f"Loading checkpoint: {args.checkpoint}")
     
-    # Load checkpoint to CPU first to save GPU memory
-    torch.serialization.add_safe_globals([PhotonConfig])
+    # Add both config types to safe globals
+    torch.serialization.add_safe_globals([PhotonConfig, BaselineConfig])
     ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
     
-    # Get config
-    cfg = ckpt.get("config", PhotonConfig())
+    # Detect model type from config
+    cfg = ckpt.get("config")
+    if cfg is None:
+        # Try to infer from checkpoint path
+        if "baseline" in args.checkpoint.lower():
+            print("No config found, inferring Baseline from path")
+            cfg = BaselineConfig()
+            model_type = "baseline"
+        else:
+            print("No config found, inferring PHOTON from path")
+            cfg = PhotonConfig()
+            model_type = "photon"
+    elif isinstance(cfg, BaselineConfig):
+        model_type = "baseline"
+        print("Detected: Baseline Transformer")
+    elif isinstance(cfg, PhotonConfig):
+        model_type = "photon"
+        print("Detected: PHOTON")
+    else:
+        # Check config attributes to determine type
+        if hasattr(cfg, 'C1') and hasattr(cfg, 'C2'):
+            model_type = "photon"
+            print("Detected: PHOTON (from attributes)")
+        else:
+            model_type = "baseline"
+            print("Detected: Baseline (from attributes)")
     
     # Load tokenizer
     print("Loading tokenizer...")
@@ -47,9 +79,14 @@ def main():
     cfg.eos_token_id = tokenizer.eos_token_id
     cfg.pad_token_id = tokenizer.pad_token_id
     
-    # Create model directly on device with correct dtype
-    print("Creating model...")
-    model = PhotonLM(cfg)
+    # Create appropriate model
+    print(f"Creating {model_type} model...")
+    if model_type == "photon":
+        model = PhotonLM(cfg)
+        block_size = cfg.C1 * cfg.C2
+    else:
+        model = BaselineLM(cfg)
+        block_size = None  # Baseline doesn't need block alignment
     
     # Load weights
     state_dict = ckpt.get("model", ckpt.get("model_state_dict", {}))
@@ -63,8 +100,6 @@ def main():
         return
     
     model.load_state_dict(state_dict, strict=False)
-    
-    # Move to device and convert dtype
     model = model.to(device=device, dtype=dtype)
     model.eval()
     
@@ -87,15 +122,15 @@ def main():
     # Tokenize prompt
     input_ids = tokenizer.encode(args.prompt, return_tensors="pt").to(device)
     
-    # Pad to block size
-    block_size = cfg.C1 * cfg.C2
-    if input_ids.size(1) < block_size:
-        pad_len = block_size - input_ids.size(1)
-        pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
-        input_ids = torch.cat([
-            torch.full((1, pad_len), pad_id, device=device, dtype=torch.long),
-            input_ids
-        ], dim=1)
+    # For PHOTON, pad to block size
+    if model_type == "photon" and block_size:
+        if input_ids.size(1) < block_size:
+            pad_len = block_size - input_ids.size(1)
+            pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+            input_ids = torch.cat([
+                torch.full((1, pad_len), pad_id, device=device, dtype=torch.long),
+                input_ids
+            ], dim=1)
     
     # Generate
     print("Generating...\n")
@@ -104,15 +139,16 @@ def main():
     
     with torch.inference_mode():
         for i in range(args.max_tokens):
-            # Ensure length is multiple of block_size
-            curr_len = generated.size(1)
-            if curr_len % block_size != 0:
-                pad = block_size - (curr_len % block_size)
-                pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
-                generated = torch.cat([
-                    torch.full((1, pad), pad_id, device=device, dtype=torch.long),
-                    generated
-                ], dim=1)
+            # For PHOTON, ensure length is multiple of block_size
+            if model_type == "photon" and block_size:
+                curr_len = generated.size(1)
+                if curr_len % block_size != 0:
+                    pad = block_size - (curr_len % block_size)
+                    pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+                    generated = torch.cat([
+                        torch.full((1, pad), pad_id, device=device, dtype=torch.long),
+                        generated
+                    ], dim=1)
             
             # Forward pass
             with torch.autocast(device_type=device, dtype=dtype, enabled=(device=="cuda")):
@@ -137,6 +173,11 @@ def main():
             # Stop on EOS
             if next_token.item() == tokenizer.eos_token_id:
                 break
+            
+            # For baseline, limit context window
+            if model_type == "baseline" and hasattr(cfg, 'max_seq_len'):
+                if generated.size(1) > cfg.max_seq_len:
+                    generated = generated[:, -cfg.max_seq_len:]
     
     print(f"\n\n{'='*60}")
     print(f"Generated {len(generated_tokens)} tokens")

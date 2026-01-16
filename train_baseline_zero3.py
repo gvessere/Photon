@@ -134,7 +134,7 @@ def main():
             accelerator.print(f"step {step:6d} | loss {avg_loss:.4f}")
             
             # Log to wandb
-            log_wandb(accelerator, {"train/loss": avg_loss}, step, wandb_active)
+            log_wandb(accelerator, {"train/loss_lm": avg_loss}, step, wandb_active)
             
             running_loss = 0.0
         
