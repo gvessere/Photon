@@ -149,6 +149,59 @@ def load_checkpoint(
     return step
 
 
+def load_checkpoint_before_prepare(
+    accelerator: Accelerator,
+    model: torch.nn.Module,
+    checkpoint_path: str,
+    config_class: type,
+) -> int:
+    """
+    Load checkpoint BEFORE accelerator.prepare() for ZeRO-3 compatibility.
+    
+    With ZeRO-3, parameters are sharded after prepare(). Loading must happen
+    before that, when the model still has full parameters on each rank.
+    
+    Args:
+        accelerator: Accelerate instance
+        model: The model (NOT yet prepared/wrapped)
+        checkpoint_path: Path to checkpoint file
+        config_class: Config class to add to safe globals
+    
+    Returns:
+        Step number from checkpoint
+    """
+    accelerator.print(f"Loading checkpoint: {checkpoint_path}")
+    
+    # Add config class to safe globals for PyTorch 2.6+
+    torch.serialization.add_safe_globals([config_class])
+    ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    
+    # Load model weights (model is NOT wrapped yet)
+    state_dict = ckpt.get("model", ckpt.get("model_state_dict", {}))
+    
+    # Handle module. prefix from DeepSpeed saves
+    if any(k.startswith("module.") for k in state_dict.keys()):
+        state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+    
+    # Check for empty ZeRO shards (indicates bad checkpoint)
+    empty_count = sum(1 for v in state_dict.values() if v.numel() == 0)
+    if empty_count > 10:
+        accelerator.print(f"WARNING: Checkpoint has {empty_count} empty tensors (bad ZeRO-3 save)")
+        accelerator.print("This checkpoint may have been saved incorrectly. Try re-saving.")
+    
+    # Load directly into model (not unwrapped since not yet prepared)
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    if missing:
+        accelerator.print(f"Missing keys: {len(missing)} (may be expected for new architecture)")
+    if unexpected:
+        accelerator.print(f"Unexpected keys: {len(unexpected)}")
+    
+    step = ckpt.get("step", 0)
+    accelerator.print(f"Resumed from step {step}")
+    
+    return step
+
+
 def get_common_args(parser, default_save_dir: str = "checkpoints"):
     """Add common training arguments to parser."""
     # Data

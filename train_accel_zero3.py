@@ -27,7 +27,7 @@ from accelerate.utils import DeepSpeedPlugin
 from photon import PhotonConfig, PhotonLM
 from photon.data import create_dataloaders
 from train_utils import (
-    save_checkpoint, load_checkpoint, get_common_args,
+    save_checkpoint, load_checkpoint_before_prepare, get_common_args,
     init_wandb, log_wandb, finish_wandb
 )
 
@@ -104,13 +104,13 @@ def main():
         cfg.pad_token_id = tokenizer.pad_token_id
         cfg.vocab_size = len(tokenizer)
     
-    # Prepare model and dataloader
-    model, train_loader = accelerator.prepare(model, train_loader)
-    
-    # Resume from checkpoint if specified
+    # Resume from checkpoint if specified (BEFORE prepare for ZeRO-3)
     start_step = 0
     if args.resume:
-        start_step = load_checkpoint(accelerator, model, args.resume, PhotonConfig)
+        start_step = load_checkpoint_before_prepare(accelerator, model, args.resume, PhotonConfig)
+    
+    # Prepare model and dataloader
+    model, train_loader = accelerator.prepare(model, train_loader)
     
     accelerator.print("Starting training...")
     
