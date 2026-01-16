@@ -510,7 +510,8 @@ class PhotonLM(nn.Module):
         self.start_latent_l1 = nn.Parameter(torch.randn(cfg.d_latent) * 0.02)
         
         # Level 2 -> Level 1 decoder
-        self.dec_conv2 = TableMatchedConverter(
+        # Input converter: L2 latent -> R2 conditioning vectors (Paper: 9728->2432)
+        self.dec_conv2_in = TableMatchedConverter(
             d_in=cfg.d_latent,
             d_out=cfg.d_latent,
             R=cfg.R2,
@@ -525,9 +526,8 @@ class PhotonLM(nn.Module):
             use_sdpa=cfg.use_sdpa,
             gradient_checkpointing=cfg.gradient_checkpointing
         )
-        
-        # Latent prediction head (deterministic, trained with MSE)
-        self.latent_pred_head = nn.Linear(cfg.d_latent, cfg.d_latent, bias=False)
+        # Output projection: decoder output -> L1 latent (Paper: 2432->2432)
+        self.dec_proj2_out = nn.Linear(cfg.d_latent, cfg.d_latent, bias=False)
         
         # Level 1 -> Token decoder
         self.dec_conv1 = TableMatchedConverter(
@@ -632,8 +632,8 @@ class PhotonLM(nn.Module):
             x2[:, :-1, :].detach(),
         ], dim=1)  # [B, M2, D]
         
-        # Conditioning prefix from converter
-        cond2 = self.dec_conv2(prev_l2)  # [B, M2, R2, D]
+        # Conditioning prefix from input converter
+        cond2 = self.dec_conv2_in(prev_l2)  # [B, M2, R2, D]
         
         # Slot tokens for positions to predict (match dtype of encoded latents)
         slots2 = torch.zeros(B, M2, cfg.C2, cfg.d_latent, device=input_ids.device, dtype=x1.dtype)
@@ -646,8 +646,8 @@ class PhotonLM(nn.Module):
         dec_out2 = self.dec_ctx2(dec_in2, is_causal=True)  # [B*M2, R2+C2, D]
         pred_h = dec_out2[:, cfg.R2:, :]  # [B*M2, C2, D]
         
-        # Predict L1 latents (deterministic)
-        pred_l1 = self.latent_pred_head(pred_h)  # [B*M2, C2, D]
+        # Output projection to L1 latents
+        pred_l1 = self.dec_proj2_out(pred_h)  # [B*M2, C2, D]
         pred_l1 = pred_l1.view(B, M2, cfg.C2, cfg.d_latent)
         
         # Latent loss (MSE)

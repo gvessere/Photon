@@ -94,8 +94,8 @@ class TestShapes:
         B = 2
         latent = torch.randn(B, small_config.d_latent)
         
-        # Level 2 converter
-        cond2 = model.dec_conv2(latent)
+        # Level 2 input converter
+        cond2 = model.dec_conv2_in(latent)
         assert cond2.shape == (B, small_config.R2, small_config.d_latent)
         
         # Level 1 converter
@@ -107,10 +107,9 @@ class TestShapes:
         B, M = 2, 8  # 8 latents in sequence
         latent_seq = torch.randn(B, M, small_config.d_latent)
         
-        mean, logvar = model.latent_ar_head(latent_seq)
+        pred = model.latent_ar_head(latent_seq)
         
-        assert mean.shape == (B, M, small_config.d_latent)
-        assert logvar.shape == (B, M, small_config.d_latent)
+        assert pred.shape == (B, M, small_config.d_latent)
 
 
 # =============================================================================

@@ -152,8 +152,8 @@ def generate_one_block(
     device = prev_l1.device
     
     # Step 1: Decode L2 -> C2 L1 latents
-    # Condition on prev_l2
-    cond2 = model.dec_conv2(prev_l2)  # [B, R2, D]
+    # Condition on prev_l2 using input converter
+    cond2 = model.dec_conv2_in(prev_l2)  # [B, R2, D]
     
     # Generate C2 L1 latents autoregressively
     l1_latents = []
@@ -173,9 +173,9 @@ def generate_one_block(
         
         dec_out = model.dec_ctx2(dec_in, is_causal=True)
         
-        # Predict L1 latent (deterministic)
+        # Output projection to L1 latent
         h = dec_out[:, -1, :]  # [B, D]
-        next_l1 = model.latent_pred_head(h)
+        next_l1 = model.dec_proj2_out(h)
         
         l1_latents.append(next_l1)
         current_l1 = next_l1
@@ -280,8 +280,8 @@ def decode_l2_to_l1_latent(model: PhotonLM, l2_latent: torch.Tensor) -> torch.Te
     B = l2_latent.size(0)
     device = l2_latent.device
     
-    # Condition on L2
-    cond = model.dec_conv2(l2_latent)  # [B, R2, D]
+    # Condition on L2 using input converter
+    cond = model.dec_conv2_in(l2_latent)  # [B, R2, D]
     
     # Use a single slot to predict one L1 latent
     slot = torch.zeros(B, 1, cfg.d_latent, device=device)
@@ -290,8 +290,8 @@ def decode_l2_to_l1_latent(model: PhotonLM, l2_latent: torch.Tensor) -> torch.Te
     dec_out = model.dec_ctx2(dec_in, is_causal=True)
     h = dec_out[:, -1, :]  # [B, D]
     
-    # Return predicted L1 latent
-    return model.latent_pred_head(h)
+    # Output projection to L1 latent
+    return model.dec_proj2_out(h)
 
 
 def sample_token(
