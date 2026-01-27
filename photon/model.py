@@ -506,8 +506,8 @@ class PhotonLM(nn.Module):
         
         # --- Decoder side (top-down) ---
         # Learned start latents
-        self.start_latent_l2 = nn.Parameter(torch.randn(cfg.d_latent) * 0.02)
-        self.start_latent_l1 = nn.Parameter(torch.randn(cfg.d_latent) * 0.02)
+        self.start_latent_l2 = nn.Parameter(torch.randn(cfg.d_latent) / math.sqrt(cfg.d_latent))
+        self.start_latent_l1 = nn.Parameter(torch.randn(cfg.d_latent) / math.sqrt(cfg.d_latent))
         
         # Level 2 -> Level 1 decoder
         # Input converter: L2 latent -> R2 conditioning vectors (Paper: 9728->2432)
@@ -621,7 +621,7 @@ class PhotonLM(nn.Module):
         
         # Target: x1 grouped into chunks of C2
         # Always detach TARGET to prevent encoder from learning "easy" latents
-        x1_chunks = x1.detach().view(B, M2, cfg.C2, cfg.d_latent)  # [B, M2, C2, D]
+        x1_chunks = x1.view(B, M2, cfg.C2, cfg.d_latent)  # [B, M2, C2, D]
         
         # Previous level-2 latent (start token for g=0)
         # Optionally detach conditioning based on config
@@ -664,7 +664,7 @@ class PhotonLM(nn.Module):
             ar_pred = self.latent_ar_head(x2)
             # Predict x2[1:] from x2[:-1]
             ar_pred_shifted = ar_pred[:, :-1, :]
-            ar_target = x2[:, 1:, :].detach()  # Always detach target
+            ar_target = x2[:, 1:, :]  # Always detach target
             loss_ctx = F.mse_loss(ar_pred_shifted, ar_target)
         
         # =====================================================================
