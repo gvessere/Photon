@@ -76,7 +76,7 @@ pip install -r requirements.txt
 ```bash
 # PHOTON (2×T4 GPUs with DeepSpeed ZeRO-3)
 accelerate launch --num_processes 2 train_accel_zero3.py
-# Defaults now favor low VRAM: batch_size=1 per process, grad_accum=8 (scale with processes); AdamW lr 3e-4 with 3k warmup (see ds/zero3_fp16.json).
+# Defaults aim for the paper’s total batch ≈256: batch_size=3 per process, grad_accum=43 on 2 processes (~258 effective); AdamW lr 3e-4 with 3k warmup (see ds/zero3_fp16.json). Adjust grad_accum if num_processes changes.
 
 # Baseline transformer for comparison
 accelerate launch --num_processes 2 train_baseline_zero3.py

@@ -207,17 +207,18 @@ def get_common_args(parser, default_save_dir: str = "checkpoints"):
     # Data
     parser.add_argument("--dataset", type=str, default="EleutherAI/the_pile_deduplicated")
     parser.add_argument("--tokenizer", type=str, default="mistralai/Mistral-7B-v0.1")
-    parser.add_argument("--batch_size", type=int, default=1)
+    parser.add_argument("--batch_size", type=int, default=3)
     
     # Training
     parser.add_argument("--steps", type=int, default=20000)
-    parser.add_argument("--grad_accum", type=int, default=8)
+    # With 2 processes and batch_size=3, grad_accum=43 -> ~258 effective (≈256 target)
+    parser.add_argument("--grad_accum", type=int, default=43)
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
     
     # Logging & Checkpointing
     parser.add_argument("--log_every", type=int, default=50)
     parser.add_argument("--eval_every", type=int, default=500)
-    parser.add_argument("--save_every", type=int, default=1000)
+    parser.add_argument("--save_every", type=int, default=500)
     parser.add_argument("--save_dir", type=str, default=default_save_dir)
     parser.add_argument("--keep_last", type=int, default=5,
                         help="Keep only the last N checkpoints (0 = keep all)")
