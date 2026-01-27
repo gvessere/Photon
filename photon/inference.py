@@ -24,7 +24,7 @@ def generate_photon(
     temperature: float = 1.0,
     top_k: int = 50,
     top_p: float = 0.9,
-    use_latent_ar: bool = True,
+    use_latent_ar: bool = False,
     eos_token_id: Optional[int] = None,
 ) -> torch.Tensor:
     """
@@ -96,7 +96,7 @@ def generate_photon(
                 break
         
         # Update latents for next block
-        if use_latent_ar:
+        if use_latent_ar and model.latent_ar_head is not None:
             # Generate next L2 latent using AR head (deterministic)
             next_l2 = model.latent_ar_head.predict_next(l2_history)
             l2_history = torch.cat([l2_history, next_l2.unsqueeze(1)], dim=1)

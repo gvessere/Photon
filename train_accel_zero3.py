@@ -43,13 +43,15 @@ def parse_args():
     
     # Model config - defaults sized for 2×T4 (15GB each)
     parser.add_argument("--n_layers", type=int, default=4)
-    parser.add_argument("--n_heads", type=int, default=8)
-    parser.add_argument("--d_ff", type=int, default=2048)
+    parser.add_argument("--n_heads", type=int, default=32)
+    parser.add_argument("--d_ff", type=int, default=4096)
     parser.add_argument("--gradient_checkpointing", action="store_true", default=True)
+    parser.add_argument("--tie_embeddings", action="store_true", help="Tie decoder embed and lm_head")
+    parser.add_argument("--use_latent_ar", action="store_true", help="Enable latent AR head (not in Table 7)")
     
     # Loss weighting (Paper Eq. 7)
     parser.add_argument("--lambda_lm", type=float, default=1.0, help="Weight for LM loss")
-    parser.add_argument("--lambda_ctx", type=float, default=1.0, help="Weight for next-context loss")
+    parser.add_argument("--lambda_ctx", type=float, default=0.0, help="Weight for next-context loss (AR head off by default)")
     parser.add_argument("--lambda_rec", type=float, default=1.0, help="Weight for reconstruction loss")
     
     # Conditioning detach (True = prevent collusion, False = joint encoder-decoder learning)
@@ -93,6 +95,8 @@ def main():
         lambda_rec=args.lambda_rec,
         # Conditioning detach behavior
         detach_conditioning=not args.no_detach_conditioning,
+        tie_embeddings=args.tie_embeddings,
+        use_latent_ar=args.use_latent_ar,
     )
     
     # Create model

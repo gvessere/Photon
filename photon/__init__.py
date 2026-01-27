@@ -1,12 +1,11 @@
 """
 PHOTON: Hierarchical Latent Language Model
 
-A faithful implementation of PHOTON with:
+Paper-aligned defaults (PHOTON-600M / Table 6):
 - Multi-level latent hierarchy (tokens -> L1 -> L2)
-- Top-down autoregressive generation
-- Table 7 matched converter dimensions
+- Top-down autoregressive generation (optional latent AR head disabled by default)
+- Converters sized to paper params (1664 → 1664 with R=4, d_int=832)
 - RoPE positional encoding per level
-- Gaussian NLL latent loss
 - DeepSpeed ZeRO-3 / Accelerate compatible
 """
 

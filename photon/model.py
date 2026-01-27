@@ -1,13 +1,10 @@
 """
 PHOTON Model Architecture
 
-Complete implementation with:
-- SDPA (scaled_dot_product_attention) for efficient attention
-- RoPE positional encoding at all levels
-- Table 7 matched converter (1D conv)
-- Gaussian NLL latent loss
-- Top-level latent AR head
-- Gradient checkpointing support
+Configured to match the PHOTON-600M paper defaults (Table 6, Jan 2025):
+- d_embed_enc=416, d_latent=1664, n_heads=32, d_head=52, d_ff=4096
+- Converter sized to ~5.54M params with d_converter=832, R=4, d_latent=1664 (Table 6 matched converters)
+- Latent AR head optional; disabled by default for table parity
 """
 
 import math
@@ -309,22 +306,20 @@ class LinearChunker(nn.Module):
 
 
 # =============================================================================
-# Table 7 Matched Converter (1D Conv based)
+# Table 6 Matched Converter (1D Conv based)
 # =============================================================================
 
 class TableMatchedConverter(nn.Module):
     """
-    Converter U_theta matching Table 7 dimensions.
-    
-    Table 7 shows: 9728 -> 2432
-    - 9728 = 4 * 2432 suggests concatenating 4 latents (or R previous latents)
-    - Uses 1D convolution for expansion to R conditioning vectors
-    
-    Input: [B, d_in] single latent
-    Output: [B, R, d_out] conditioning prefix
+    Converter U_theta matching the PHOTON-600M dimensions (1664 → 1664).
+
+    Uses 1D convolution to expand a latent into R conditioning vectors.
+
+    Input: [B, d_in] single latent or [B, N, d_in]
+    Output: [B, R, d_out] or [B, N, R, d_out]
     """
     
-    def __init__(self, d_in: int, d_out: int, R: int, d_internal: int = 2432):
+    def __init__(self, d_in: int, d_out: int, R: int, d_internal: int = 832):
         super().__init__()
         self.R = R
         self.d_out = d_out
@@ -457,7 +452,7 @@ class PhotonLM(nn.Module):
     Complete implementation with:
     - Two-level latent hierarchy (tokens -> L1 -> L2)
     - Top-level latent AR generation (deterministic)
-    - Table 7 matched converters
+    - Table 6 matched converters
     - RoPE at all levels
     - MSE latent loss (simpler, more stable)
     - Gradient checkpointing support
@@ -495,14 +490,17 @@ class PhotonLM(nn.Module):
         )
         
         # --- Top-level latent AR (for generation without re-encoding) ---
-        self.latent_ar_head = LatentARHead(
-            d_latent=cfg.d_latent,
-            n_heads=cfg.n_heads,
-            d_ff=cfg.d_ff,
-            n_layers=cfg.n_layers_latent_ar,
-            rope_theta=cfg.rope_theta,
-            use_sdpa=cfg.use_sdpa
-        )
+        if cfg.use_latent_ar and cfg.n_layers_latent_ar > 0:
+            self.latent_ar_head = LatentARHead(
+                d_latent=cfg.d_latent,
+                n_heads=cfg.n_heads,
+                d_ff=cfg.d_ff,
+                n_layers=cfg.n_layers_latent_ar,
+                rope_theta=cfg.rope_theta,
+                use_sdpa=cfg.use_sdpa
+            )
+        else:
+            self.latent_ar_head = None
         
         # --- Decoder side (top-down) ---
         # Learned start latents
@@ -510,7 +508,7 @@ class PhotonLM(nn.Module):
         self.start_latent_l1 = nn.Parameter(torch.randn(cfg.d_latent) / math.sqrt(cfg.d_latent))
         
         # Level 2 -> Level 1 decoder
-        # Input converter: L2 latent -> R2 conditioning vectors (Paper: 9728->2432)
+        # Input converter: L2 latent -> R2 conditioning vectors (paper Table 6: 1664->1664)
         self.dec_conv2_in = TableMatchedConverter(
             d_in=cfg.d_latent,
             d_out=cfg.d_latent,
@@ -526,7 +524,7 @@ class PhotonLM(nn.Module):
             use_sdpa=cfg.use_sdpa,
             gradient_checkpointing=cfg.gradient_checkpointing
         )
-        # Output projection: decoder output -> L1 latent (Paper: 2432->2432)
+        # Output projection: decoder output -> L1 latent (Table 6: 1664->1664)
         self.dec_proj2_out = nn.Linear(cfg.d_latent, cfg.d_latent, bias=False)
         
         # Level 1 -> Token decoder
@@ -548,8 +546,9 @@ class PhotonLM(nn.Module):
         )
         self.lm_head = nn.Linear(cfg.d_latent, cfg.vocab_size, bias=False)
         
-        # Tie embeddings
-        self.lm_head.weight = self.dec_embed.weight
+        # Tie embeddings (table counts assume untied)
+        if cfg.tie_embeddings:
+            self.lm_head.weight = self.dec_embed.weight
         
         # Initialize weights
         self.apply(self._init_weights)
@@ -658,13 +657,13 @@ class PhotonLM(nn.Module):
         # (B) Next-context prediction loss (L_ctx in paper)
         # =====================================================================
         
-        # Train AR head to predict x2[g] from x2[<g]
+        # Train AR head to predict x2[g] from x2[<g] (only if enabled)
         loss_ctx = torch.tensor(0.0, device=input_ids.device, dtype=x1.dtype)
-        if M2 > 1:
+        if self.latent_ar_head is not None and M2 > 1:
             ar_pred = self.latent_ar_head(x2)
             # Predict x2[1:] from x2[:-1]
             ar_pred_shifted = ar_pred[:, :-1, :]
-            ar_target = x2[:, 1:, :]  # Always detach target
+            ar_target = x2[:, 1:, :].detach()  # detach target
             loss_ctx = F.mse_loss(ar_pred_shifted, ar_target)
         
         # =====================================================================
