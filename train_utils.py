@@ -56,16 +56,49 @@ def save_checkpoint(
     ckpt_path = None
     if accelerator.is_main_process:
         ckpt_path = os.path.join(save_dir, f"{prefix}_{step}.pt")
-        torch.save({
+        payload = {
             "step": step,
             "model": state_dict,
             "config": config,
-        }, ckpt_path)
+        }
+        # Store wandb metadata if available
+        try:
+            import wandb  # type: ignore
+            if wandb.run is not None:
+                payload["wandb_run_id"] = wandb.run.id
+                payload["wandb_run_name"] = wandb.run.name
+        except Exception:
+            pass
+        torch.save(payload, ckpt_path)
         accelerator.print(f"[save] Checkpoint saved to {ckpt_path}")
         
         # Remove old checkpoints if keep_last > 0
         if keep_last > 0:
             _cleanup_old_checkpoints(save_dir, prefix, keep_last, accelerator)
+
+        # Upload to W&B and keep only the latest artifact
+        try:
+            import wandb  # type: ignore
+            if wandb.run is not None:
+                art_name = f"{prefix}-latest"
+                art = wandb.Artifact(name=art_name, type="checkpoint")
+                art.add_file(ckpt_path, name=os.path.basename(ckpt_path))
+                logged = wandb.run.log_artifact(art, aliases=["latest"])
+                accelerator.print(f"[wandb] Logged artifact '{art_name}:latest'")
+
+                # Delete older artifact versions to save space
+                try:
+                    api = wandb.Api()
+                    coll = api.artifact_collection(wandb.run.entity, wandb.run.project, art_name)
+                    versions = list(coll.versions())
+                    # keep the most recent (index 0) and delete the rest
+                    for old_art in versions[1:]:
+                        old_art.delete()
+                        accelerator.print(f"[wandb] Deleted older artifact version {old_art.name}")
+                except Exception as e:
+                    accelerator.print(f"[wandb] Artifact cleanup skipped: {e}")
+        except Exception as e:
+            accelerator.print(f"[wandb] Artifact upload failed: {e}")
     
     return ckpt_path
 
@@ -237,6 +270,8 @@ def get_common_args(parser, default_save_dir: str = "checkpoints"):
                         help="W&B project name")
     parser.add_argument("--wandb_run", type=str, default=None,
                         help="W&B run name (auto-generated if not specified)")
+    parser.add_argument("--wandb_id", type=str, default=None,
+                        help="W&B run id for resuming the same run (sets wandb.init id=..., resume='allow')")
     
     return parser
 
@@ -286,14 +321,17 @@ def init_wandb(
                 wandb_config[f"model_{field}"] = getattr(config, field)
         
         run_name = args.wandb_run or f"{model_name}-{n_params // 1_000_000}M"
+        run_id = args.wandb_id
         
         wandb.init(
             project=args.wandb_project,
             name=run_name,
+            id=run_id,
             config=wandb_config,
             resume="allow",
         )
-        accelerator.print(f"[wandb] Logging to project '{args.wandb_project}', run '{run_name}'")
+        accelerator.print(f"[wandb] Logging to project '{args.wandb_project}', run '{run_name}'"
+                          f"{' (resume id=' + run_id + ')' if run_id else ''}")
     
     return True
 
