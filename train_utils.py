@@ -211,7 +211,7 @@ def get_common_args(parser, default_save_dir: str = "checkpoints"):
     
     # Training
     parser.add_argument("--steps", type=int, default=20000)
-    parser.add_argument("--grad_accum", type=int, default=4)
+    parser.add_argument("--grad_accum", type=int, default=8)
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
     
     # Logging & Checkpointing

@@ -22,12 +22,12 @@ from torch.utils.checkpoint import checkpoint
 
 @dataclass
 class BaselineConfig:
-    """Configuration for baseline transformer."""
+    """Configuration for baseline transformer (paper-aligned defaults = Vanilla 600M, Table 2)."""
     vocab_size: int = 32000
-    d_model: int = 1024
-    n_heads: int = 8
-    n_layers: int = 8
-    d_ff: int = 2816  # ~2.75x d_model for SwiGLU
+    d_model: int = 1664
+    n_heads: int = 32
+    n_layers: int = 16
+    d_ff: int = 4096
     max_seq_len: int = 2048
     
     # RoPE
@@ -36,6 +36,9 @@ class BaselineConfig:
     # Training
     gradient_checkpointing: bool = True
     use_sdpa: bool = True
+
+    # Weight tying
+    tie_embeddings: bool = False  # Paper counts LM head separately
     
     # Tokens
     eos_token_id: Optional[int] = None
@@ -188,8 +191,9 @@ class BaselineLM(nn.Module):
         self.ln_f = nn.RMSNorm(cfg.d_model)
         self.lm_head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
         
-        # Tie embeddings
-        self.lm_head.weight = self.embed.weight
+        # Tie embeddings (optional; untied by default for paper parity)
+        if cfg.tie_embeddings:
+            self.lm_head.weight = self.embed.weight
         
         self.gradient_checkpointing = cfg.gradient_checkpointing
         

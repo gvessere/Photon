@@ -36,7 +36,7 @@
   "optimizer": {
     "type": "AdamW",
     "params": {
-      "lr": 5e-5,
+      "lr": 0.0003,
       "betas": [0.9, 0.95],
       "eps": 1e-8,
       "weight_decay": 0.1
@@ -46,8 +46,8 @@
     "type": "WarmupDecayLR",
     "params": {
       "warmup_min_lr": 0,
-      "warmup_max_lr": 5e-5,
-      "warmup_num_steps": 500,
+      "warmup_max_lr": 0.0003,
+      "warmup_num_steps": 3000,
       "total_num_steps": 20000
     }
   }

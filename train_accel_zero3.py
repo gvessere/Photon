@@ -4,6 +4,7 @@ PHOTON Training Script with Accelerate + DeepSpeed ZeRO-3
 
 Launch with:
     accelerate launch --num_processes 2 train_accel_zero3.py
+Defaults tuned for lower VRAM: batch_size=1 per process with grad_accum=8 (effective batch scales with num processes); lr/warmup from ds/zero3_fp16.json (AdamW, 3e-4 peak, 3k warmup steps).
 
 Resume from checkpoint:
     accelerate launch --num_processes 2 train_accel_zero3.py --resume checkpoints_photon/checkpoint_1000.pt

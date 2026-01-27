@@ -32,13 +32,11 @@ def parse_args():
     # Add common args with baseline-specific save dir
     get_common_args(parser, default_save_dir="checkpoints_baseline")
     
-    # Baseline-specific args
+    # Baseline-specific args (paper-aligned vanilla 600M defaults)
     parser.add_argument("--max_seq_len", type=int, default=2048)
-    
-    # Model - sized to match PHOTON ~650M params
-    parser.add_argument("--d_model", type=int, default=1536)
-    parser.add_argument("--n_heads", type=int, default=12)
-    parser.add_argument("--n_layers", type=int, default=24)
+    parser.add_argument("--d_model", type=int, default=1664)
+    parser.add_argument("--n_heads", type=int, default=32)
+    parser.add_argument("--n_layers", type=int, default=16)
     parser.add_argument("--d_ff", type=int, default=4096)
     parser.add_argument("--gradient_checkpointing", action="store_true", default=True)
     
@@ -71,6 +69,7 @@ def main():
         d_ff=args.d_ff,
         max_seq_len=args.max_seq_len,
         gradient_checkpointing=args.gradient_checkpointing,
+        tie_embeddings=False,
     )
     
     # Create model
