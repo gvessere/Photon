@@ -89,9 +89,13 @@ def save_checkpoint(
                 # Delete older artifact versions to save space
                 try:
                     api = wandb.Api()
-                    coll = api.artifact_collection(wandb.run.entity, wandb.run.project, art_name)
+                    atype = api.artifact_type(
+                        type_name="checkpoint",
+                        project=f"{wandb.run.entity}/{wandb.run.project}",
+                    )
+                    coll = atype.collection(art_name)
                     versions = list(coll.versions())
-                    # keep the most recent (index 0) and delete the rest
+                    # keep most recent (index 0); delete older ones
                     for old_art in versions[1:]:
                         old_art.delete()
                         accelerator.print(f"[wandb] Deleted older artifact version {old_art.name}")
