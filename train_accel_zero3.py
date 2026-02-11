@@ -178,6 +178,7 @@ def main():
             x2_temporal_mse = (x2[:, 1:, :] - x2[:, :-1, :]).pow(2).mean().item()
             x1_temporal_mse = (x1[:, 1:, :] - x1[:, :-1, :]).pow(2).mean().item()
             a2_temporal_mse = (a2[:, 1:, :] - a2[:, :-1, :]).pow(2).mean().item()
+            x1_std = x1.std(dim=1).mean().item()
         
         # Logging
         if accelerator.is_main_process and step % args.log_every == 0:
@@ -200,6 +201,9 @@ def main():
                 log_payload["train/x2_temporal_mse"] = x2_temporal_mse
                 log_payload["train/x1_temporal_mse"] = x1_temporal_mse
                 log_payload["train/a2_temporal_mse"] = a2_temporal_mse
+                log_payload["train/x1_std"] = x1_std
+                log_payload["train/detach_conditioning"] = float(args.detach_conditioning)
+                log_payload["train/lambda_rec"] = float(args.lambda_rec)
             log_wandb(accelerator, log_payload, step, wandb_active)
             
             running_loss = 0.0
