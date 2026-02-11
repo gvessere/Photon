@@ -80,7 +80,8 @@ def save_checkpoint(
         try:
             import wandb  # type: ignore
             if wandb.run is not None:
-                art_name = f"{prefix}-latest"
+                # Use per-run artifact collection to avoid collisions across concurrent runs.
+                art_name = f"{prefix}-{wandb.run.id}"
                 art = wandb.Artifact(name=art_name, type="checkpoint")
                 art.add_file(ckpt_path, name=os.path.basename(ckpt_path))
                 logged = wandb.run.log_artifact(art, aliases=["latest"])
@@ -94,11 +95,29 @@ def save_checkpoint(
                         project=f"{wandb.run.entity}/{wandb.run.project}",
                     )
                     coll = atype.collection(art_name)
-                    versions = list(coll.versions())
-                    # keep most recent (index 0); delete older ones
-                    for old_art in versions[1:]:
-                        old_art.delete()
-                        accelerator.print(f"[wandb] Deleted older artifact version {old_art.name}")
+                    versions_iter = None
+                    if hasattr(coll, "versions"):
+                        versions_iter = coll.versions()
+                    elif hasattr(coll, "artifacts"):
+                        versions_iter = coll.artifacts()
+                    elif hasattr(coll, "__iter__"):
+                        versions_iter = coll
+                    if versions_iter is not None:
+                        versions = list(versions_iter)
+                        if versions:
+                            # Keep most recent; prefer created_at if available, else fall back to version.
+                            def _art_sort_key(a):
+                                created_at = getattr(a, "created_at", None)
+                                if created_at is not None:
+                                    return created_at
+                                ver = getattr(a, "version", "")
+                                if isinstance(ver, str) and ver.startswith("v") and ver[1:].isdigit():
+                                    return int(ver[1:])
+                                return 0
+                            versions.sort(key=_art_sort_key, reverse=True)
+                            for old_art in versions[1:]:
+                                old_art.delete()
+                                accelerator.print(f"[wandb] Deleted older artifact version {old_art.name}")
                 except Exception as e:
                     accelerator.print(f"[wandb] Artifact cleanup skipped: {e}")
         except Exception as e:
