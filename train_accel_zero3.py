@@ -168,8 +168,10 @@ def main():
         running_loss_lm += out.get("loss_lm", torch.tensor(0.0)).item()
         if args.log_latent_stats:
             x2 = out["x2"].float()
-            x1 = out["x1"].float()
-            a2 = model.enc_chunk2(x1).float()
+            x1 = out["x1"]
+            a2 = model.enc_chunk2(x1)
+            x1 = x1.float()
+            a2 = a2.float()
 
             x2_var = x2.var().item()
             x2_abs_mean = x2.abs().mean().item()
