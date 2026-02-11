@@ -49,6 +49,8 @@ def parse_args():
     parser.add_argument("--gradient_checkpointing", action="store_true", default=True)
     parser.add_argument("--tie_embeddings", action="store_true", help="Tie decoder embed and lm_head")
     parser.add_argument("--use_latent_ar", action="store_true", help="Enable latent AR head (not in Table 7)")
+    parser.add_argument("--n_layers_latent_ar", type=int, default=0,
+                        help="Number of layers in latent AR head (set >0 to train)")
     
     # Loss weighting (Paper Eq. 7)
     parser.add_argument("--lambda_lm", type=float, default=1.0, help="Weight for LM loss")
@@ -98,6 +100,7 @@ def main():
         detach_conditioning=not args.no_detach_conditioning,
         tie_embeddings=args.tie_embeddings,
         use_latent_ar=args.use_latent_ar,
+        n_layers_latent_ar=args.n_layers_latent_ar,
     )
     
     # Create model

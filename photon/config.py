@@ -60,7 +60,7 @@ class PhotonConfig:
     # Detach conditioning paths to prevent encoder-decoder collusion
     # Set to False to allow gradients to flow from decoder back to encoder
     # (closer to paper's "reconstruction" but risks mode collapse)
-    detach_conditioning: bool = True
+    detach_conditioning: bool = False
     
     # EOS token id (set during data loading)
     eos_token_id: Optional[int] = None
