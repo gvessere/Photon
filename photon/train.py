@@ -140,12 +140,12 @@ def train_single_gpu(
         # Forward with AMP - use explicit fp16 dtype for T4 compatibility
         with autocast("cuda", dtype=torch.float16):
             out = model(**batch)
-            loss = out["loss"] if isinstance(out, dict) else out.loss
-            loss = loss / grad_accum_steps
+            loss_unscaled = out["loss"] if isinstance(out, dict) else out.loss
+            loss = loss_unscaled / grad_accum_steps
         
         # Backward
         scaler.scale(loss).backward()
-        accumulated_loss += loss.item()
+        accumulated_loss += loss_unscaled.item()
         
         # Optimizer step (with gradient accumulation)
         if step % grad_accum_steps == 0:
@@ -159,7 +159,8 @@ def train_single_gpu(
             
             # Log
             if (step // grad_accum_steps) % log_every == 0:
-                avg_loss = accumulated_loss * grad_accum_steps / log_every
+                micro_steps = log_every * grad_accum_steps
+                avg_loss = accumulated_loss / micro_steps
                 print(f"step {step} loss {avg_loss:.4f}")
                 history["train_loss"].append(avg_loss)
                 accumulated_loss = 0.0
@@ -260,6 +261,8 @@ def create_accelerate_training_fn():
         
         # Training loop
         history = {"train_loss": [], "eval_loss": [], "eval_ppl": []}
+        running_loss = 0.0
+        running_steps = 0
         model.train()
         it = iter(train_loader)
         
@@ -275,6 +278,8 @@ def create_accelerate_training_fn():
             with accelerator.autocast():
                 out = model(**batch)
                 loss = out["loss"] if isinstance(out, dict) else out.loss
+            running_loss += loss.detach().float().item()
+            running_steps += 1
             
             # Backward
             accelerator.backward(loss)
@@ -288,8 +293,11 @@ def create_accelerate_training_fn():
             
             # Log (main process only)
             if accelerator.is_main_process and step % log_every == 0:
-                accelerator.print(f"step {step} loss {loss.item():.4f}")
-                history["train_loss"].append(loss.item())
+                avg_loss = running_loss / max(running_steps, 1)
+                accelerator.print(f"step {step} loss {avg_loss:.4f}")
+                history["train_loss"].append(avg_loss)
+                running_loss = 0.0
+                running_steps = 0
             
             # Evaluate
             if eval_loader is not None and step % eval_every == 0:

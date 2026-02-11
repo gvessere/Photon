@@ -663,7 +663,7 @@ class PhotonLM(nn.Module):
             ar_pred = self.latent_ar_head(x2)
             # Predict x2[1:] from x2[:-1]
             ar_pred_shifted = ar_pred[:, :-1, :]
-            ar_target = x2[:, 1:, :].detach()  # detach target
+            ar_target = x2[:, 1:, :].detach() if self.cfg.detach_conditioning else x2[:, 1:, :]
             loss_ctx = F.mse_loss(ar_pred_shifted, ar_target)
         
         # =====================================================================
