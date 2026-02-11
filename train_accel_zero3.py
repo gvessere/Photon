@@ -60,6 +60,8 @@ def parse_args():
     # Conditioning detach (True = prevent collusion, False = joint encoder-decoder learning)
     parser.add_argument("--no_detach_conditioning", action="store_true",
                        help="Don't detach conditioning paths (allow encoder-decoder gradient flow)")
+    parser.add_argument("--log_latent_stats", action="store_true",
+                        help="Log x2 latent stats (var/abs mean) for collapse debugging")
     
     return parser.parse_args()
 
@@ -155,7 +157,7 @@ def main():
         
         # Forward and backward
         with accelerator.accumulate(model):
-            out = model(**batch)
+            out = model(**batch, return_latents=args.log_latent_stats)
             loss = out["loss"]
             accelerator.backward(loss)
         
@@ -163,6 +165,10 @@ def main():
         running_loss_rec += out.get("loss_rec", torch.tensor(0.0)).item()
         running_loss_ctx += out.get("loss_ctx", torch.tensor(0.0)).item()
         running_loss_lm += out.get("loss_lm", torch.tensor(0.0)).item()
+        if args.log_latent_stats:
+            x2 = out["x2"].float()
+            x2_var = x2.var().item()
+            x2_abs_mean = x2.abs().mean().item()
         
         # Logging
         if accelerator.is_main_process and step % args.log_every == 0:
@@ -173,12 +179,16 @@ def main():
             accelerator.print(f"step {step:6d} | loss {avg_loss:.4f} | rec {avg_rec:.4f} | ctx {avg_ctx:.4f} | lm {avg_lm:.4f}")
             
             # Log to wandb
-            log_wandb(accelerator, {
+            log_payload = {
                 "train/loss": avg_loss,
                 "train/loss_rec": avg_rec,
                 "train/loss_ctx": avg_ctx,
                 "train/loss_lm": avg_lm,
-            }, step, wandb_active)
+            }
+            if args.log_latent_stats:
+                log_payload["train/x2_var"] = x2_var
+                log_payload["train/x2_abs_mean"] = x2_abs_mean
+            log_wandb(accelerator, log_payload, step, wandb_active)
             
             running_loss = 0.0
             running_loss_rec = 0.0
