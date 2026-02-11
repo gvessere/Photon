@@ -18,33 +18,40 @@ During training, decoders operate in parallel using encoder outputs:
 flowchart TB
     subgraph Training["TRAINING - Teacher Forcing"]
         direction TB
-        
+
         tokens["Tokens"]
-        
+
         subgraph Encoder["Encoder - Bottom Up"]
             enc_emb["Embed tokens"]
             enc_l1["Chunk + Transform → x1"]
             enc_l2["Chunk + Transform → x2"]
             enc_emb --> enc_l1 --> enc_l2
         end
-        
-        subgraph Decoders["Decoders - Parallel, NOT chained"]
+
+        subgraph Decoders["Decoders - Parallel"]
             dec_l2["Dec L2: x2 → pred_x1"]
-            dec_l1["Dec L1: x1 → logits"]
+            dec_l1["Dec L1 (chunked): x1 → logits"]
+            dec_full["Dec L1 (full-context): tokens → logits"]
         end
-        
+
         subgraph Losses["Loss Computation"]
             loss_rec["L_rec: MSE pred_x1 vs x1"]
             loss_ctx["L_ctx: AR predicts next x2"]
-            loss_lm["L_lm: CE logits vs tokens"]
+            loss_lm["L_lm: CE logits_full vs tokens"]
+            loss_distill["L_distill: KL logits_chunked vs logits_full"]
         end
-        
+
+        subgraph LatentAR["Latent AR Head"]
+            ar_head["AR Head: x2[g] ← x2[<g]"]
+        end
+
         tokens --> Encoder
+        tokens --> dec_full --> loss_lm
         enc_l2 --> dec_l2 --> loss_rec
         enc_l1 -.->|"target"| loss_rec
-        enc_l1 --> dec_l1 --> loss_lm
-        tokens -.->|"target"| loss_lm
-        enc_l2 --> loss_ctx
+        enc_l1 --> dec_l1 --> loss_distill
+        dec_full -.->|"teacher"| loss_distill
+        enc_l2 --> ar_head --> loss_ctx
     end
 ```
 
@@ -53,14 +60,14 @@ flowchart TB
 During inference, decoders chain together—no re-encoding needed:
 
 ```mermaid
-flowchart LR
+flowchart TB
     subgraph Inference["INFERENCE - Chained"]
-        AR["AR Head<br>predict x2"] --> DecL2["Dec L2<br>x2 → pred_x1"] --> DecL1["Dec L1<br>x1 → tokens"]
+        direction TB
+        ar["AR Head: predict x2"]
+        dec_l2["Dec L2: x2 → pred_x1"]
+        dec_l1["Dec L1: x1 → tokens"]
+        ar --> dec_l2 --> dec_l1
     end
-    
-    style AR fill:#fff3e0
-    style DecL2 fill:#e8f5e9
-    style DecL1 fill:#fce4ec
 ```
 
 ## Quick Start

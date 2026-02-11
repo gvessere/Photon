@@ -36,7 +36,7 @@ class PhotonConfig:
     d_ff: int = 4096        # FFN hidden dimension
     n_layers_enc: int = 4   # Encoder transformer layers per level
     n_layers_dec: int = 4   # Decoder transformer layers per level
-    n_layers_latent_ar: int = 0  # Latent AR head layers (paper tables exclude AR head)
+    n_layers_latent_ar: int = 2  # Latent AR head layers (paper tables exclude AR head)
     
     # RoPE settings
     rope_theta: float = 10000.0
@@ -46,12 +46,17 @@ class PhotonConfig:
     tie_embeddings: bool = False     # Paper counts LM head separately (untied)
 
     # Optional latent AR head (not in paper parameter totals)
-    use_latent_ar: bool = False
+    use_latent_ar: bool = True
+
+    # Full-context LM path + distillation to chunked decoder
+    use_full_context_lm: bool = True
+    lambda_distill: float = 1.0
+    distill_temperature: float = 1.0
     
     # Loss weighting (Paper Eq. 7: L = L_LM + λ_ctx * L_ctx + λ_rec * L_rec)
     lambda_lm: float = 1.0      # Weight for token prediction loss
-    lambda_ctx: float = 0.0     # Weight for next-context prediction (L2 AR)
-    lambda_rec: float = 0.0     # Weight for reconstruction loss (L2→L1 prediction)
+    lambda_ctx: float = 1.0     # Weight for next-context prediction (L2 AR)
+    lambda_rec: float = 0.3     # Weight for reconstruction loss (L2→L1 prediction)
     
     # Training settings
     gradient_checkpointing: bool = False

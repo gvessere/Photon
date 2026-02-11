@@ -48,18 +48,31 @@ def parse_args():
     parser.add_argument("--d_ff", type=int, default=4096)
     parser.add_argument("--gradient_checkpointing", action="store_true", default=True)
     parser.add_argument("--tie_embeddings", action="store_true", help="Tie decoder embed and lm_head")
-    parser.add_argument("--use_latent_ar", action="store_true", help="Enable latent AR head (not in Table 7)")
-    parser.add_argument("--n_layers_latent_ar", type=int, default=0,
-                        help="Number of layers in latent AR head (set >0 to train)")
+    parser.add_argument("--use_latent_ar", action="store_true", default=True,
+                        help="Enable latent AR head (default: on)")
+    parser.add_argument("--no_use_latent_ar", action="store_false", dest="use_latent_ar",
+                        help="Disable latent AR head")
+    parser.add_argument("--n_layers_latent_ar", type=int, default=2,
+                        help="Number of layers in latent AR head (default: 2)")
     
     # Loss weighting (Paper Eq. 7)
-    parser.add_argument("--lambda_lm", type=float, default=1.0, help="Weight for LM loss")
-    parser.add_argument("--lambda_ctx", type=float, default=0.0, help="Weight for next-context loss (AR head off by default)")
-    parser.add_argument("--lambda_rec", type=float, default=1.0, help="Weight for reconstruction loss")
+    parser.add_argument("--lambda_lm", type=float, default=1.0, help="Weight for LM loss (default: 1.0)")
+    parser.add_argument("--lambda_ctx", type=float, default=1.0, help="Weight for next-context loss (default: 1.0)")
+    parser.add_argument("--lambda_rec", type=float, default=0.3, help="Weight for reconstruction loss (default: 0.3)")
+    parser.add_argument("--use_full_context_lm", action="store_true", default=True,
+                        help="Use full-context LM loss (default: on)")
+    parser.add_argument("--no_use_full_context_lm", action="store_false", dest="use_full_context_lm",
+                        help="Disable full-context LM loss")
+    parser.add_argument("--lambda_distill", type=float, default=1.0,
+                        help="Weight for distillation loss (default: 1.0)")
+    parser.add_argument("--distill_temperature", type=float, default=1.0,
+                        help="Temperature for distillation loss (default: 1.0)")
     
     # Conditioning detach (True = prevent collusion, False = joint encoder-decoder learning)
-    parser.add_argument("--no_detach_conditioning", action="store_true",
-                       help="Don't detach conditioning paths (allow encoder-decoder gradient flow)")
+    parser.add_argument("--no_detach_conditioning", action="store_false", dest="detach_conditioning", default=False,
+                       help="Don't detach conditioning paths (default: on)")
+    parser.add_argument("--detach_conditioning", action="store_true", dest="detach_conditioning",
+                        help="Detach conditioning paths (disable encoder-decoder gradient flow)")
     parser.add_argument("--log_latent_stats", action="store_true",
                         help="Log x2 latent stats (var/abs mean) for collapse debugging")
     
@@ -98,8 +111,11 @@ def main():
         lambda_lm=args.lambda_lm,
         lambda_ctx=args.lambda_ctx,
         lambda_rec=args.lambda_rec,
+        use_full_context_lm=args.use_full_context_lm,
+        lambda_distill=args.lambda_distill,
+        distill_temperature=args.distill_temperature,
         # Conditioning detach behavior
-        detach_conditioning=not args.no_detach_conditioning,
+        detach_conditioning=args.detach_conditioning,
         tie_embeddings=args.tie_embeddings,
         use_latent_ar=args.use_latent_ar,
         n_layers_latent_ar=args.n_layers_latent_ar,
@@ -146,6 +162,7 @@ def main():
     running_loss_rec = 0.0
     running_loss_ctx = 0.0
     running_loss_lm = 0.0
+    running_loss_distill = 0.0
     
     for step in range(start_step + 1, args.steps + 1):
         # Get batch
@@ -165,6 +182,7 @@ def main():
         running_loss_rec += out.get("loss_rec", torch.tensor(0.0)).item()
         running_loss_ctx += out.get("loss_ctx", torch.tensor(0.0)).item()
         running_loss_lm += out.get("loss_lm", torch.tensor(0.0)).item()
+        running_loss_distill += out.get("loss_distill", torch.tensor(0.0)).item()
         if args.log_latent_stats:
             x2 = out["x2"].float()
             x2_var = x2.var().item()
@@ -176,6 +194,7 @@ def main():
             avg_rec = running_loss_rec / args.log_every
             avg_ctx = running_loss_ctx / args.log_every
             avg_lm = running_loss_lm / args.log_every
+            avg_distill = running_loss_distill / args.log_every
             accelerator.print(f"step {step:6d} | loss {avg_loss:.4f} | rec {avg_rec:.4f} | ctx {avg_ctx:.4f} | lm {avg_lm:.4f}")
             
             # Log to wandb
@@ -184,6 +203,7 @@ def main():
                 "train/loss_rec": avg_rec,
                 "train/loss_ctx": avg_ctx,
                 "train/loss_lm": avg_lm,
+                "train/loss_distill": avg_distill,
             }
             if args.log_latent_stats:
                 log_payload["train/x2_var"] = x2_var
@@ -194,6 +214,7 @@ def main():
             running_loss_rec = 0.0
             running_loss_ctx = 0.0
             running_loss_lm = 0.0
+            running_loss_distill = 0.0
         
         # Evaluation
         if eval_loader is not None and step % args.eval_every == 0:

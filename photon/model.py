@@ -695,15 +695,24 @@ class PhotonLM(nn.Module):
         dec_out1 = self.dec_ctx1(dec_in1, is_causal=True)  # [B*M1, R1+C1, D]
         token_h = dec_out1[:, cfg.R1:, :]  # [B*M1, C1, D]
         
-        # LM head
-        logits = self.lm_head(token_h)  # [B*M1, C1, vocab]
-        logits = logits.view(B, M1 * cfg.C1, cfg.vocab_size)
+        # LM head (chunked path)
+        logits_chunked = self.lm_head(token_h)  # [B*M1, C1, vocab]
+        logits_chunked = logits_chunked.view(B, M1 * cfg.C1, cfg.vocab_size)
+
+        # Optional full-context LM path (baseline-style)
+        logits_full = None
+        if cfg.use_full_context_lm:
+            tok_emb_full = self.dec_embed(input_ids)  # [B, T, D]
+            full_h = self.dec_ctx1(tok_emb_full, is_causal=True)  # [B, T, D]
+            logits_full = self.lm_head(full_h)  # [B, T, vocab]
         
         # Cross-entropy loss
         loss_lm = None
+        loss_distill = torch.tensor(0.0, device=input_ids.device, dtype=logits_chunked.dtype)
         if labels is not None:
-            # Shift for next-token prediction
-            shift_logits = logits[:, :-1, :].contiguous()
+            # Shift for next-token prediction (prefer full-context if enabled)
+            base_logits = logits_full if logits_full is not None else logits_chunked
+            shift_logits = base_logits[:, :-1, :].contiguous()
             shift_labels = labels[:, 1:].contiguous()
             
             # Handle EOS masking
@@ -718,20 +727,37 @@ class PhotonLM(nn.Module):
                 shift_labels.view(-1),
                 ignore_index=-100
             )
+
+            # Distill full-context LM into chunked decoder if enabled
+            if logits_full is not None and cfg.lambda_distill > 0:
+                T = cfg.distill_temperature
+                student = logits_chunked[:, :-1, :].contiguous()
+                teacher = logits_full[:, :-1, :].contiguous().detach()
+                mask = shift_labels != -100
+                if mask.any():
+                    log_probs_s = F.log_softmax(student / T, dim=-1)
+                    probs_t = F.softmax(teacher / T, dim=-1)
+                    kl = F.kl_div(log_probs_s, probs_t, reduction="none").sum(-1)
+                    loss_distill = (kl[mask].mean()) * (T * T)
         
         # Combined loss (Paper Eq. 7: L = L_LM + λ_ctx * L_ctx + λ_rec * L_rec)
         loss = cfg.lambda_rec * loss_rec + cfg.lambda_ctx * loss_ctx
         if loss_lm is not None:
             loss = loss + cfg.lambda_lm * loss_lm
+        if cfg.lambda_distill > 0:
+            loss = loss + cfg.lambda_distill * loss_distill
         
         out = {
             "loss": loss,
             "loss_rec": loss_rec,    # Reconstruction loss (L2→L1)
             "loss_ctx": loss_ctx,    # Next-context prediction (AR)
-            "logits": logits,
+            "logits": logits_chunked,
         }
         if loss_lm is not None:
             out["loss_lm"] = loss_lm
+            out["loss_distill"] = loss_distill
+        if logits_full is not None:
+            out["logits_full"] = logits_full
         
         if return_latents:
             out["x1"] = x1
