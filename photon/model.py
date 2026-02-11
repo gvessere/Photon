@@ -175,6 +175,59 @@ class CausalSelfAttention(nn.Module):
         y = y.transpose(1, 2).contiguous().view(B, T, D)
         return self.out(y)
 
+    def forward_with_kv_cache(
+        self,
+        x: torch.Tensor,
+        kv_cache: Optional[Dict[str, torch.Tensor]] = None,
+        position_ids: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """
+        Incremental forward with KV cache.
+
+        Args:
+            x: [B, 1, D] new token embedding
+            kv_cache: {"k": [B, H, T, Dh], "v": [B, H, T, Dh]} or None
+            position_ids: [B, 1] position indices for RoPE
+
+        Returns:
+            (y, new_cache)
+        """
+        B, T, D = x.shape
+        assert T == 1, "forward_with_kv_cache expects a single step input"
+
+        qkv = self.qkv(x)  # [B, 1, 3*D]
+        q, k, v = qkv.chunk(3, dim=-1)
+        q = q.view(B, T, self.n_heads, self.d_head).transpose(1, 2)  # [B, H, 1, Dh]
+        k = k.view(B, T, self.n_heads, self.d_head).transpose(1, 2)
+        v = v.view(B, T, self.n_heads, self.d_head).transpose(1, 2)
+
+        if self.rope is not None:
+            q = self.rope(q, position_ids)
+            k = self.rope(k, position_ids)
+
+        if kv_cache is None:
+            k_cat = k
+            v_cat = v
+        else:
+            k_cat = torch.cat([kv_cache["k"], k], dim=2)
+            v_cat = torch.cat([kv_cache["v"], v], dim=2)
+
+        if self.use_sdpa:
+            y = F.scaled_dot_product_attention(
+                q, k_cat, v_cat,
+                attn_mask=None,
+                is_causal=False,
+                dropout_p=0.0,
+            )
+        else:
+            scale = 1.0 / math.sqrt(self.d_head)
+            att = torch.matmul(q, k_cat.transpose(-2, -1)) * scale
+            att = F.softmax(att, dim=-1)
+            y = torch.matmul(att, v_cat)
+
+        y = y.transpose(1, 2).contiguous().view(B, T, D)
+        return self.out(y), {"k": k_cat, "v": v_cat}
+
 
 # =============================================================================
 # Feed-Forward Network (MLP)
@@ -214,6 +267,17 @@ class TransformerBlock(nn.Module):
         x = x + self.attn(self.ln1(x), attn_mask=attn_mask, is_causal=is_causal, position_ids=position_ids)
         x = x + self.mlp(self.ln2(x))
         return x
+
+    def forward_step(
+        self,
+        x: torch.Tensor,
+        kv_cache: Optional[Dict[str, torch.Tensor]] = None,
+        position_ids: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        h, new_cache = self.attn.forward_with_kv_cache(self.ln1(x), kv_cache, position_ids=position_ids)
+        x = x + h
+        x = x + self.mlp(self.ln2(x))
+        return x, new_cache
 
 
 # =============================================================================
@@ -263,6 +327,29 @@ class CtxTransformer(nn.Module):
                 x = blk(x, attn_mask=attn_mask, is_causal=is_causal, position_ids=position_ids)
         
         return self.ln_f(x)
+
+    def init_kv_cache(self) -> list:
+        return [None for _ in range(len(self.blocks))]
+
+    def forward_step(
+        self,
+        x: torch.Tensor,
+        kv_cache: list,
+    ) -> Tuple[torch.Tensor, list]:
+        """
+        Incremental forward for a single step with KV cache.
+        """
+        B, T, _ = x.shape
+        assert T == 1, "forward_step expects a single step input"
+        pos = 0
+        if kv_cache[0] is not None:
+            pos = kv_cache[0]["k"].size(2)
+        position_ids = torch.full((B, 1), pos, device=x.device, dtype=torch.long)
+
+        for i, blk in enumerate(self.blocks):
+            x, kv_cache[i] = blk.forward_step(x, kv_cache[i], position_ids=position_ids)
+
+        return self.ln_f(x), kv_cache
 
 
 # =============================================================================
@@ -650,8 +737,8 @@ class PhotonLM(nn.Module):
         pred_l1 = self.dec_proj2_out(pred_h)  # [B*M2, C2, D]
         pred_l1 = pred_l1.view(B, M2, cfg.C2, cfg.d_latent)
         
-        # Reconstruction loss L_rec (MSE between decoder prediction and encoder output)
-        loss_rec = F.mse_loss(pred_l1, x1_chunks)
+        # Reconstruction loss L_rec (cosine distance per position, paper-aligned)
+        loss_rec = (1.0 - F.cosine_similarity(pred_l1, x1_chunks, dim=-1)).mean()
         
         # =====================================================================
         # (B) Next-context prediction loss (L_ctx in paper)
@@ -696,23 +783,14 @@ class PhotonLM(nn.Module):
         token_h = dec_out1[:, cfg.R1:, :]  # [B*M1, C1, D]
         
         # LM head (chunked path)
-        logits_chunked = self.lm_head(token_h)  # [B*M1, C1, vocab]
-        logits_chunked = logits_chunked.view(B, M1 * cfg.C1, cfg.vocab_size)
-
-        # Optional full-context LM path (baseline-style)
-        logits_full = None
-        if cfg.use_full_context_lm:
-            tok_emb_full = self.dec_embed(input_ids)  # [B, T, D]
-            full_h = self.dec_ctx1(tok_emb_full, is_causal=True)  # [B, T, D]
-            logits_full = self.lm_head(full_h)  # [B, T, vocab]
+        logits = self.lm_head(token_h)  # [B*M1, C1, vocab]
+        logits = logits.view(B, M1 * cfg.C1, cfg.vocab_size)
         
         # Cross-entropy loss
         loss_lm = None
-        loss_distill = torch.tensor(0.0, device=input_ids.device, dtype=logits_chunked.dtype)
         if labels is not None:
-            # Shift for next-token prediction (prefer full-context if enabled)
-            base_logits = logits_full if logits_full is not None else logits_chunked
-            shift_logits = base_logits[:, :-1, :].contiguous()
+            # Shift for next-token prediction
+            shift_logits = logits[:, :-1, :].contiguous()
             shift_labels = labels[:, 1:].contiguous()
             
             # Handle EOS masking
@@ -727,37 +805,20 @@ class PhotonLM(nn.Module):
                 shift_labels.view(-1),
                 ignore_index=-100
             )
-
-            # Distill full-context LM into chunked decoder if enabled
-            if logits_full is not None and cfg.lambda_distill > 0:
-                T = cfg.distill_temperature
-                student = logits_chunked[:, :-1, :].contiguous()
-                teacher = logits_full[:, :-1, :].contiguous().detach()
-                mask = shift_labels != -100
-                if mask.any():
-                    log_probs_s = F.log_softmax(student / T, dim=-1)
-                    probs_t = F.softmax(teacher / T, dim=-1)
-                    kl = F.kl_div(log_probs_s, probs_t, reduction="none").sum(-1)
-                    loss_distill = (kl[mask].mean()) * (T * T)
         
         # Combined loss (Paper Eq. 7: L = L_LM + λ_ctx * L_ctx + λ_rec * L_rec)
         loss = cfg.lambda_rec * loss_rec + cfg.lambda_ctx * loss_ctx
         if loss_lm is not None:
             loss = loss + cfg.lambda_lm * loss_lm
-        if cfg.lambda_distill > 0:
-            loss = loss + cfg.lambda_distill * loss_distill
         
         out = {
             "loss": loss,
             "loss_rec": loss_rec,    # Reconstruction loss (L2→L1)
             "loss_ctx": loss_ctx,    # Next-context prediction (AR)
-            "logits": logits_chunked,
+            "logits": logits,
         }
         if loss_lm is not None:
             out["loss_lm"] = loss_lm
-            out["loss_distill"] = loss_distill
-        if logits_full is not None:
-            out["logits_full"] = logits_full
         
         if return_latents:
             out["x1"] = x1

@@ -30,43 +30,43 @@ flowchart TB
 
         subgraph Decoders["Decoders - Parallel"]
             dec_l2["Dec L2: x2 → pred_x1"]
-            dec_l1["Dec L1 (chunked): x1 → logits"]
-            dec_full["Dec L1 (full-context): tokens → logits"]
+            dec_l1["Dec L1: x1 → logits"]
         end
 
         subgraph Losses["Loss Computation"]
-            loss_rec["L_rec: MSE pred_x1 vs x1"]
-            loss_ctx["L_ctx: AR predicts next x2"]
-            loss_lm["L_lm: CE logits_full vs tokens"]
-            loss_distill["L_distill: KL logits_chunked vs logits_full"]
-        end
-
-        subgraph LatentAR["Latent AR Head"]
-            ar_head["AR Head: x2[g] ← x2[<g]"]
+            loss_rec["L_rec: cosine dist pred_x1 vs x1"]
+            loss_lm["L_lm: CE logits vs tokens"]
         end
 
         tokens --> Encoder
-        tokens --> dec_full --> loss_lm
+        enc_l1 --> dec_l1 --> loss_lm
+        tokens -.->|"target"| loss_lm
         enc_l2 --> dec_l2 --> loss_rec
         enc_l1 -.->|"target"| loss_rec
-        enc_l1 --> dec_l1 --> loss_distill
-        dec_full -.->|"teacher"| loss_distill
-        enc_l2 --> ar_head --> loss_ctx
     end
 ```
 
-### Inference (Chained Top-Down)
+### Inference (RecGen)
 
-During inference, decoders chain together—no re-encoding needed:
+During inference, RecGen updates the coarse stream from decoder-side reconstructions (no bottom-up re-encoding):
 
 ```mermaid
 flowchart TB
-    subgraph Inference["INFERENCE - Chained"]
+    subgraph Inference["INFERENCE - RecGen"]
         direction TB
-        ar["AR Head: predict x2"]
-        dec_l2["Dec L2: x2 → pred_x1"]
-        dec_l1["Dec L1: x1 → tokens"]
-        ar --> dec_l2 --> dec_l1
+
+        prompt["Prompt tokens"]
+        enc["One-time encoder prefill"]
+        x2["Coarse stream x2 (cached)"]
+
+        dec_l2["Dec L2: x2 → x1_hat"]
+        dec_l1["Dec L1: x1_hat → tokens"]
+        chunk2["Chunker C2: x1_hat → A2"]
+        ctx2["Ctx Enc L2: A2 → x2 (streaming)"]
+
+        prompt --> enc --> x2
+        x2 --> dec_l2 --> dec_l1
+        dec_l2 --> chunk2 --> ctx2 --> x2
     end
 ```
 
@@ -125,7 +125,7 @@ Photon/
 | `d_ff` | 4096 | FFN hidden dim |
 | `lambda_lm` | 1.0 | LM loss weight |
 | `lambda_ctx` | 0.0 | Next-context loss (AR head off by default) |
-| `lambda_rec` | 1.0 | Reconstruction loss weight |
+| `lambda_rec` | 0.0 | Reconstruction loss weight |
 
 ## References
 

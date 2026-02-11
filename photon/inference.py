@@ -1,8 +1,8 @@
 """
 PHOTON Inference Module
 
-True top-down generation without re-encoding:
-1. Use LatentARHead to generate new level-L latents
+Recursive generation without bottom-up re-encoding:
+1. Use decoder-side reconstructions to update the coarse stream
 2. Cascade down through converters
 3. Generate tokens chunk by chunk
 """
@@ -24,16 +24,15 @@ def generate_photon(
     temperature: float = 1.0,
     top_k: int = 50,
     top_p: float = 0.9,
-    use_latent_ar: bool = False,
     eos_token_id: Optional[int] = None,
 ) -> torch.Tensor:
     """
     Generate tokens using PHOTON's hierarchical latent structure.
     
-    True top-down generation:
+    Recursive generation:
     1. Encode prompt to get initial latents
-    2. Use LatentARHead to generate new L2 latents (deterministic)
-    3. Decode L2 -> L1 -> tokens through converters
+    2. Decode top-down to generate tokens and decoder-side L1 reconstructions
+    3. Update coarse stream from decoder-side reconstructions (no bottom-up re-encoding)
     
     Args:
         model: PhotonLM model
@@ -42,7 +41,6 @@ def generate_photon(
         temperature: Sampling temperature for tokens
         top_k: Top-k sampling (0 to disable)
         top_p: Top-p (nucleus) sampling (1.0 to disable)
-        use_latent_ar: Use AR head for latents (True = no re-encoding)
         eos_token_id: Stop generation on this token
     
     Returns:
@@ -66,25 +64,30 @@ def generate_photon(
     # Current state
     cur_tokens = input_ids.clone()
     
-    # Latent history for AR head
-    l2_history = x2  # [B, M2, D]
+    # Track coarse stream inputs (summaries) for RecGen updates
+    a2_history = model.enc_chunk2(x1)  # [B, M2, D]
     prev_l1 = x1[:, -1, :]  # [B, D] - last L1 latent
-    prev_l2 = x2[:, -1, :]  # [B, D] - last L2 latent
+
+    # Initialize streaming cache for top-level context encoder
+    ctx2_cache = model.enc_ctx2.init_kv_cache()
+    last_x2 = None
+    for i in range(a2_history.size(1)):
+        last_x2, ctx2_cache = model.enc_ctx2.forward_step(a2_history[:, i:i+1, :], ctx2_cache)
+    prev_l2 = last_x2[:, -1, :]
     
     new_tokens = []
     tokens_generated = 0
     
     while tokens_generated < max_new_tokens:
         # Generate C1*C2 tokens (one full block) at a time
-        block_tokens = generate_one_block(
+        block_tokens, l1_latents = generate_one_block(
             model=model,
             prev_l1=prev_l1,
             prev_l2=prev_l2,
-            l2_history=l2_history if use_latent_ar else None,
             temperature=temperature,
             top_k=top_k,
             top_p=top_p,
-        )  # [B, C1*C2]
+        )  # [B, C1*C2], [B, C2, D]
         
         new_tokens.append(block_tokens)
         cur_tokens = torch.cat([cur_tokens, block_tokens], dim=1)
@@ -95,22 +98,12 @@ def generate_photon(
             if (block_tokens == eos_token_id).any():
                 break
         
-        # Update latents for next block
-        if use_latent_ar and model.latent_ar_head is not None:
-            # Generate next L2 latent using AR head (deterministic)
-            next_l2 = model.latent_ar_head.predict_next(l2_history)
-            l2_history = torch.cat([l2_history, next_l2.unsqueeze(1)], dim=1)
-            prev_l2 = next_l2
-            
-            # Generate L1 latent from L2 using decoder
-            next_l1 = decode_l2_to_l1_latent(model, prev_l2)
-            prev_l1 = next_l1
-        else:
-            # Fallback: re-encode to get new latents
-            x1, x2 = model.encode(cur_tokens)
-            prev_l1 = x1[:, -1, :]
-            prev_l2 = x2[:, -1, :]
-            l2_history = x2
+        # Recursive update: use decoder-side L1 reconstructions to update coarse stream
+        next_a2 = model.enc_chunk2(l1_latents)  # [B, 1, D]
+        a2_history = torch.cat([a2_history, next_a2], dim=1)
+        last_x2, ctx2_cache = model.enc_ctx2.forward_step(next_a2, ctx2_cache)
+        prev_l2 = last_x2[:, -1, :]
+        prev_l1 = l1_latents[:, -1, :]
     
     # Concatenate and truncate
     generated = cur_tokens[:, :input_ids.size(1) + max_new_tokens]
@@ -122,30 +115,27 @@ def generate_one_block(
     model: PhotonLM,
     prev_l1: torch.Tensor,
     prev_l2: torch.Tensor,
-    l2_history: Optional[torch.Tensor] = None,
     temperature: float = 1.0,
     top_k: int = 50,
     top_p: float = 0.9,
-) -> torch.Tensor:
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Generate one full block of C1*C2 tokens.
     
     Uses the hierarchical structure:
-    1. If l2_history provided, use AR head to predict L2 latents (deterministic)
-    2. Decode L2 -> C2 L1 latents (deterministic)
-    3. Decode each L1 -> C1 tokens
+    1. Decode L2 -> C2 L1 latents (deterministic)
+    2. Decode each L1 -> C1 tokens
     
     Args:
         model: PhotonLM model
         prev_l1: [B, D] previous L1 latent (for first chunk)
         prev_l2: [B, D] previous L2 latent
-        l2_history: [B, M2, D] history for AR (None = use prev_l2 directly)
         temperature: Token sampling temperature
         top_k: Top-k sampling
         top_p: Top-p sampling
     
     Returns:
-        [B, C1*C2] generated tokens
+        ([B, C1*C2] generated tokens, [B, C2, D] L1 latents)
     """
     cfg = model.cfg
     B = prev_l1.size(0)
@@ -204,7 +194,7 @@ def generate_one_block(
     # Concatenate all chunks
     block_tokens = torch.cat(all_tokens, dim=1)  # [B, C1*C2]
     
-    return block_tokens
+    return block_tokens, l1_latents
 
 
 def generate_token_chunk(
@@ -261,37 +251,6 @@ def generate_token_chunk(
         chunk_tokens.append(next_token)
     
     return torch.stack(chunk_tokens, dim=1)  # [B, C1]
-
-
-def decode_l2_to_l1_latent(model: PhotonLM, l2_latent: torch.Tensor) -> torch.Tensor:
-    """
-    Decode a single L2 latent to get the corresponding L1 latent.
-    
-    Uses the decoder to predict the mean of the L1 latent distribution.
-    
-    Args:
-        model: PhotonLM model
-        l2_latent: [B, D] L2 latent
-    
-    Returns:
-        [B, D] L1 latent (mean of predicted distribution)
-    """
-    cfg = model.cfg
-    B = l2_latent.size(0)
-    device = l2_latent.device
-    
-    # Condition on L2 using input converter
-    cond = model.dec_conv2_in(l2_latent)  # [B, R2, D]
-    
-    # Use a single slot to predict one L1 latent
-    slot = torch.zeros(B, 1, cfg.d_latent, device=device)
-    dec_in = torch.cat([cond, slot], dim=1)  # [B, R2+1, D]
-    
-    dec_out = model.dec_ctx2(dec_in, is_causal=True)
-    h = dec_out[:, -1, :]  # [B, D]
-    
-    # Output projection to L1 latent
-    return model.dec_proj2_out(h)
 
 
 def sample_token(
