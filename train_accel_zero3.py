@@ -50,8 +50,6 @@ def parse_args():
     parser.add_argument("--tie_embeddings", action="store_true", help="Tie decoder embed and lm_head")
     parser.add_argument("--use_latent_ar", action="store_true", default=False,
                         help="Enable latent AR head (default: off)")
-    parser.add_argument("--no_use_latent_ar", action="store_false", dest="use_latent_ar",
-                        help="Disable latent AR head")
     parser.add_argument("--n_layers_latent_ar", type=int, default=0,
                         help="Number of layers in latent AR head (default: 0)")
     
@@ -63,8 +61,6 @@ def parse_args():
     # Conditioning detach (True = prevent collusion, False = joint encoder-decoder learning)
     parser.add_argument("--no_detach_conditioning", action="store_false", dest="detach_conditioning", default=False,
                        help="Don't detach conditioning paths (default: on)")
-    parser.add_argument("--detach_conditioning", action="store_true", dest="detach_conditioning",
-                        help="Detach conditioning paths (disable encoder-decoder gradient flow)")
     parser.add_argument("--log_latent_stats", action="store_true",
                         help="Log x2 latent stats (var/abs mean) for collapse debugging")
     
