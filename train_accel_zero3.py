@@ -187,6 +187,7 @@ def main():
             x2 = out["x2"].float()
             x2_var = x2.var().item()
             x2_abs_mean = x2.abs().mean().item()
+            x2_temporal_mse = (x2[:, 1:, :] - x2[:, :-1, :]).pow(2).mean().item()
         
         # Logging
         if accelerator.is_main_process and step % args.log_every == 0:
@@ -208,6 +209,7 @@ def main():
             if args.log_latent_stats:
                 log_payload["train/x2_var"] = x2_var
                 log_payload["train/x2_abs_mean"] = x2_abs_mean
+                log_payload["train/x2_temporal_mse"] = x2_temporal_mse
             log_wandb(accelerator, log_payload, step, wandb_active)
             
             running_loss = 0.0
