@@ -168,9 +168,14 @@ def main():
         running_loss_lm += out.get("loss_lm", torch.tensor(0.0)).item()
         if args.log_latent_stats:
             x2 = out["x2"].float()
+            x1 = out["x1"].float()
+            a2 = model.enc_chunk2(x1).float()
+
             x2_var = x2.var().item()
             x2_abs_mean = x2.abs().mean().item()
             x2_temporal_mse = (x2[:, 1:, :] - x2[:, :-1, :]).pow(2).mean().item()
+            x1_temporal_mse = (x1[:, 1:, :] - x1[:, :-1, :]).pow(2).mean().item()
+            a2_temporal_mse = (a2[:, 1:, :] - a2[:, :-1, :]).pow(2).mean().item()
         
         # Logging
         if accelerator.is_main_process and step % args.log_every == 0:
@@ -191,6 +196,8 @@ def main():
                 log_payload["train/x2_var"] = x2_var
                 log_payload["train/x2_abs_mean"] = x2_abs_mean
                 log_payload["train/x2_temporal_mse"] = x2_temporal_mse
+                log_payload["train/x1_temporal_mse"] = x1_temporal_mse
+                log_payload["train/a2_temporal_mse"] = a2_temporal_mse
             log_wandb(accelerator, log_payload, step, wandb_active)
             
             running_loss = 0.0
