@@ -43,12 +43,11 @@
     }
   },
   "scheduler": {
-    "type": "WarmupDecayLR",
+    "type": "WarmupLR",
     "params": {
       "warmup_min_lr": 0,
       "warmup_max_lr": 0.0003,
-      "warmup_num_steps": 3000,
-      "total_num_steps": 20000
+      "warmup_num_steps": 3000
     }
   }
 }

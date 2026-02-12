@@ -41,6 +41,8 @@ def parse_args():
     
     # PHOTON-specific args
     parser.add_argument("--block_size", type=int, default=2048)
+    parser.add_argument("--C1", type=int, default=4, help="Tokens per L1 latent (default: 4)")
+    parser.add_argument("--C2", type=int, default=4, help="L1 latents per L2 latent (default: 4)")
     
     # Model config - defaults sized for 2×T4 (15GB each)
     parser.add_argument("--n_layers", type=int, default=4)
@@ -90,6 +92,8 @@ def main():
     
     # Create model config
     cfg = PhotonConfig(
+        C1=args.C1,
+        C2=args.C2,
         n_layers_enc=args.n_layers,
         n_layers_dec=args.n_layers,
         n_heads=args.n_heads,
