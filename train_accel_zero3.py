@@ -43,6 +43,9 @@ def parse_args():
     parser.add_argument("--block_size", type=int, default=2048)
     parser.add_argument("--C1", type=int, default=4, help="Tokens per L1 latent (default: 4)")
     parser.add_argument("--C2", type=int, default=4, help="L1 latents per L2 latent (default: 4)")
+    parser.add_argument("--d_embed_enc", type=int, default=416, help="Encoder token embedding dim (default: 416)")
+    parser.add_argument("--d_latent", type=int, default=None,
+                        help="Latent width (default: C1 * d_embed_enc)")
     
     # Model config - defaults sized for 2×T4 (15GB each)
     parser.add_argument("--n_layers", type=int, default=4)
@@ -91,9 +94,12 @@ def main():
     accelerator.print("=" * 60)
     
     # Create model config
+    d_latent = args.d_latent if args.d_latent is not None else args.C1 * args.d_embed_enc
     cfg = PhotonConfig(
         C1=args.C1,
         C2=args.C2,
+        d_embed_enc=args.d_embed_enc,
+        d_latent=d_latent,
         n_layers_enc=args.n_layers,
         n_layers_dec=args.n_layers,
         n_heads=args.n_heads,
