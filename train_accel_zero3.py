@@ -135,6 +135,7 @@ def main():
             block_size=args.block_size,
             batch_size=args.batch_size,
             streaming=True,
+            eval_split=args.eval_split if args.eval_split else None,
         )
         cfg.eos_token_id = tokenizer.eos_token_id
         cfg.pad_token_id = tokenizer.pad_token_id
@@ -145,8 +146,11 @@ def main():
     if args.resume:
         start_step = load_checkpoint_before_prepare(accelerator, model, args.resume, PhotonConfig)
     
-    # Prepare model and dataloader
-    model, train_loader = accelerator.prepare(model, train_loader)
+    # Prepare model and dataloaders
+    if eval_loader is not None:
+        model, train_loader, eval_loader = accelerator.prepare(model, train_loader, eval_loader)
+    else:
+        model, train_loader = accelerator.prepare(model, train_loader)
     
     accelerator.print("Starting training...")
     

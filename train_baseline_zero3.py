@@ -12,6 +12,7 @@ A baseline for comparison with PHOTON.
 """
 
 import os
+import math
 import argparse
 
 import torch
@@ -91,6 +92,7 @@ def main():
             block_size=args.max_seq_len,
             batch_size=args.batch_size,
             streaming=True,
+            eval_split=args.eval_split if args.eval_split else None,
         )
         cfg.eos_token_id = tokenizer.eos_token_id
         cfg.pad_token_id = tokenizer.pad_token_id
@@ -101,8 +103,11 @@ def main():
     if args.resume:
         start_step = load_checkpoint_before_prepare(accelerator, model, args.resume, BaselineConfig)
     
-    # Prepare model and dataloader
-    model, train_loader = accelerator.prepare(model, train_loader)
+    # Prepare model and dataloaders
+    if eval_loader is not None:
+        model, train_loader, eval_loader = accelerator.prepare(model, train_loader, eval_loader)
+    else:
+        model, train_loader = accelerator.prepare(model, train_loader)
     
     accelerator.print("Starting training...")
     
@@ -136,6 +141,32 @@ def main():
             log_wandb(accelerator, {"train/loss_lm": avg_loss}, step, wandb_active)
             
             running_loss = 0.0
+
+        # Evaluation
+        if eval_loader is not None and step % args.eval_every == 0:
+            model.eval()
+            total_loss, total_tokens = 0.0, 0
+
+            with torch.no_grad():
+                for i, eval_batch in enumerate(eval_loader):
+                    if i >= 100:
+                        break
+                    out = model(**eval_batch)
+                    total_loss += out["loss"].item() * eval_batch["labels"].numel()
+                    total_tokens += eval_batch["labels"].numel()
+
+            if total_tokens > 0:
+                mean_loss = total_loss / total_tokens
+                ppl = math.exp(min(mean_loss, 100))
+                accelerator.print(f"[eval] step {step} | loss {mean_loss:.4f} | ppl {ppl:.2f}")
+
+                # Log to wandb
+                log_wandb(accelerator, {
+                    "eval/loss": mean_loss,
+                    "eval/ppl": ppl,
+                }, step, wandb_active)
+
+            model.train()
         
         # Checkpointing
         if args.save_dir and step % args.save_every == 0:
