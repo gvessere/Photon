@@ -264,7 +264,9 @@ def get_common_args(parser, default_save_dir: str = "checkpoints"):
     parser.add_argument("--dataset", type=str, default="EleutherAI/the_pile_deduplicated")
     parser.add_argument("--tokenizer", type=str, default="mistralai/Mistral-7B-v0.1")
     parser.add_argument("--eval_split", type=str, default="validation",
-                        help="Dataset split to use for evaluation (empty string disables eval loading)")
+                        help="Dataset split for evaluation (if missing, eval is derived from train)")
+    parser.add_argument("--eval_from_train_examples", type=int, default=10000,
+                        help="When eval split is missing, reserve this many train examples for eval")
     parser.add_argument("--batch_size", type=int, default=3)
     
     # Training

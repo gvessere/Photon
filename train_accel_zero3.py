@@ -136,6 +136,7 @@ def main():
             batch_size=args.batch_size,
             streaming=True,
             eval_split=args.eval_split if args.eval_split else None,
+            eval_from_train_examples=args.eval_from_train_examples,
         )
         cfg.eos_token_id = tokenizer.eos_token_id
         cfg.pad_token_id = tokenizer.pad_token_id

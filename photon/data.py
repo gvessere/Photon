@@ -105,9 +105,10 @@ def create_dataloaders(
     streaming: bool = True,
     train_split: str = "train",
     eval_split: Optional[str] = None,
+    eval_from_train_examples: int = 10000,
 ) -> tuple:
     """
-    Create train (and optionally eval) dataloaders.
+    Create train and eval dataloaders.
     
     Args:
         dataset_name: HuggingFace dataset name
@@ -117,10 +118,12 @@ def create_dataloaders(
         num_workers: DataLoader workers
         streaming: Use streaming dataset
         train_split: Training split name
-        eval_split: Optional eval split name
+        eval_split: Eval split name. If missing in dataset, derive eval from train split.
+        eval_from_train_examples: Number of examples to reserve for eval when
+            eval_split is unavailable and streaming=True.
     
     Returns:
-        (train_loader, eval_loader, tokenizer) - eval_loader may be None
+        (train_loader, eval_loader, tokenizer)
     """
     from datasets import load_dataset
     
@@ -128,15 +131,34 @@ def create_dataloaders(
     tokenizer = create_tokenizer(tokenizer_name)
     eos_token_id = tokenizer.eos_token_id
     
-    # Load dataset
-    dataset = load_dataset(dataset_name, split=train_split, streaming=streaming)
+    # Load training split and ensure eval data exists.
+    train_dataset = load_dataset(dataset_name, split=train_split, streaming=streaming)
+    eval_dataset = None
+    if eval_split:
+        try:
+            eval_dataset = load_dataset(dataset_name, split=eval_split, streaming=streaming)
+        except ValueError as e:
+            if streaming:
+                if eval_from_train_examples <= 0:
+                    raise ValueError(
+                        "eval_from_train_examples must be > 0 when deriving eval from train split."
+                    ) from e
+                # Deterministic split for iterable datasets: reserve the first N examples for eval.
+                eval_dataset = load_dataset(dataset_name, split=train_split, streaming=True).take(
+                    eval_from_train_examples
+                )
+                train_dataset = train_dataset.skip(eval_from_train_examples)
+            else:
+                split_ds = train_dataset.train_test_split(test_size=0.01, seed=42, shuffle=True)
+                train_dataset = split_ds["train"]
+                eval_dataset = split_ds["test"]
     
     # Tokenize
     tokenize_partial = partial(tokenize_fn, tokenizer=tokenizer, max_length=block_size)
-    tokenized = dataset.map(
+    tokenized = train_dataset.map(
         tokenize_partial,
         batched=True,
-        remove_columns=["text", "meta"] if "meta" in dataset.column_names else ["text"]
+        remove_columns=["text", "meta"] if "meta" in train_dataset.column_names else ["text"]
     )
     
     # Group into blocks
@@ -151,22 +173,23 @@ def create_dataloaders(
         num_workers=num_workers
     )
     
-    # Eval loader if requested
-    eval_loader = None
-    if eval_split:
-        eval_dataset = load_dataset(dataset_name, split=eval_split, streaming=streaming)
-        eval_tokenized = eval_dataset.map(
-            tokenize_partial,
-            batched=True,
-            remove_columns=["text", "meta"] if "meta" in eval_dataset.column_names else ["text"]
+    if eval_dataset is None:
+        raise ValueError(
+            "Evaluation dataset could not be created. Set --eval_split or provide a dataset with a valid eval split."
         )
-        eval_lm = eval_tokenized.map(group_partial, batched=True)
-        eval_loader = DataLoader(
-            eval_lm,
-            batch_size=batch_size,
-            collate_fn=collate_fn,
-            num_workers=num_workers
-        )
+
+    eval_tokenized = eval_dataset.map(
+        tokenize_partial,
+        batched=True,
+        remove_columns=["text", "meta"] if "meta" in eval_dataset.column_names else ["text"]
+    )
+    eval_lm = eval_tokenized.map(group_partial, batched=True)
+    eval_loader = DataLoader(
+        eval_lm,
+        batch_size=batch_size,
+        collate_fn=collate_fn,
+        num_workers=num_workers
+    )
     
     return train_loader, eval_loader, tokenizer
 
