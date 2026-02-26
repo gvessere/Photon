@@ -51,7 +51,7 @@ class PhotonConfig:
     # Loss weighting (Paper Eq. 7: L = L_LM + λ_ctx * L_ctx + λ_rec * L_rec)
     lambda_lm: float = 1.0      # Weight for token prediction loss
     lambda_ctx: float = 0.0     # Weight for next-context prediction (L2 AR)
-    lambda_rec: float = 0.0     # Weight for reconstruction loss (L2→L1 prediction)
+    lambda_rec: float = 0.3     # Weight for reconstruction loss (L2→L1 prediction)
     
     # Training settings
     gradient_checkpointing: bool = False

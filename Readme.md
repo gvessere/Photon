@@ -125,7 +125,7 @@ Photon/
 | `d_ff` | 4096 | FFN hidden dim |
 | `lambda_lm` | 1.0 | LM loss weight |
 | `lambda_ctx` | 0.0 | Next-context loss (AR head off by default) |
-| `lambda_rec` | 0.0 | Reconstruction loss weight |
+| `lambda_rec` | 0.3 | Reconstruction loss weight |
 
 ## References
 

@@ -61,7 +61,7 @@ def parse_args():
     # Loss weighting (Paper Eq. 7)
     parser.add_argument("--lambda_lm", type=float, default=1.0, help="Weight for LM loss (default: 1.0)")
     parser.add_argument("--lambda_ctx", type=float, default=0.0, help="Weight for next-context loss (default: 0.0)")
-    parser.add_argument("--lambda_rec", type=float, default=0.0, help="Weight for reconstruction loss (default: 0.0)")
+    parser.add_argument("--lambda_rec", type=float, default=0.3, help="Weight for reconstruction loss (default: 0.3)")
     
     # Conditioning detach (True = prevent collusion, False = joint encoder-decoder learning)
     parser.add_argument("--no_detach_conditioning", action="store_false", dest="detach_conditioning", default=False,
