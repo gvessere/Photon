@@ -85,6 +85,14 @@ pip install -r requirements.txt
 accelerate launch --num_processes 2 train_accel_zero3.py
 # Defaults aim for the paper’s total batch ≈256: batch_size=3 per process, grad_accum=43 on 2 processes (~258 effective); AdamW lr 3e-4 with 3k warmup (see ds/zero3_fp16.json). Adjust grad_accum if num_processes changes.
 
+# Resume from local checkpoint file
+accelerate launch --num_processes 2 train_accel_zero3.py --resume checkpoints_photon/photon_5000.pt
+
+# Resume from a W&B artifact attached to a run id
+accelerate launch --num_processes 2 train_accel_zero3.py \
+  --resume_artifact_run_id <run_id> \
+  --resume_artifact_alias latest
+
 # Baseline transformer for comparison
 accelerate launch --num_processes 2 train_baseline_zero3.py
 ```

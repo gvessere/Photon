@@ -9,6 +9,8 @@ Common functionality:
 """
 
 import os
+import re
+import glob
 from typing import Optional, Any, Dict
 
 import torch
@@ -258,6 +260,125 @@ def load_checkpoint_before_prepare(
     return step
 
 
+def resolve_resume_checkpoint(
+    accelerator: Accelerator,
+    args,
+    resume_prefix: str,
+) -> Optional[str]:
+    """
+    Resolve a local checkpoint path from either --resume or a W&B artifact.
+
+    Args:
+        accelerator: Accelerate instance
+        args: Parsed args from get_common_args()
+        resume_prefix: Artifact name prefix used during checkpoint saving
+
+    Returns:
+        Local checkpoint path or None if no resume source was provided
+    """
+    if args.resume and args.resume_artifact_run_id:
+        raise ValueError("Use only one resume source: --resume or --resume_artifact_run_id")
+
+    if args.resume:
+        return args.resume
+
+    if not args.resume_artifact_run_id:
+        return None
+
+    if not WANDB_AVAILABLE:
+        raise RuntimeError("wandb is required for artifact resume. Install with: pip install wandb")
+
+    api = wandb.Api()
+    entity = (
+        args.resume_artifact_entity
+        or args.wandb_entity
+        or os.environ.get("WANDB_ENTITY")
+        or getattr(api, "default_entity", None)
+    )
+    project = args.resume_artifact_project or args.wandb_project
+    run_id = args.resume_artifact_run_id
+    alias = args.resume_artifact_alias
+    artifact_name = args.resume_artifact_name or f"{resume_prefix}-{run_id}"
+
+    def _resolve_artifact_ref() -> str:
+        # Fast path: explicit full reference.
+        if entity and project:
+            return f"{entity}/{project}/{artifact_name}:{alias}"
+
+        # Try progressively less/alternate-qualified refs first.
+        refs_to_try = [f"{artifact_name}:{alias}"]
+        if project:
+            refs_to_try.insert(0, f"{project}/{artifact_name}:{alias}")
+        if entity and project:
+            refs_to_try.insert(0, f"{entity}/{project}/{artifact_name}:{alias}")
+
+        last_err = None
+        for ref in refs_to_try:
+            try:
+                api.artifact(ref)
+                return ref
+            except Exception as e:
+                last_err = e
+
+        # Fallback: infer entity/project from run id under the current/default entity.
+        if entity:
+            try:
+                projects = api.projects(entity=entity)
+                for p in projects:
+                    project_name = getattr(p, "name", None)
+                    if not project_name:
+                        continue
+                    runs = api.runs(f"{entity}/{project_name}", filters={"id": run_id}, per_page=1)
+                    if runs and len(runs) > 0:
+                        return f"{entity}/{project_name}/{artifact_name}:{alias}"
+            except Exception as e:
+                last_err = e
+
+        hint = (
+            f"Could not resolve artifact for run id '{run_id}'. "
+            "If auto-discovery fails, set --resume_artifact_entity and/or --resume_artifact_project."
+        )
+        if last_err is not None:
+            raise RuntimeError(f"{hint} Last error: {last_err}") from last_err
+        raise RuntimeError(hint)
+
+    artifact_ref = _resolve_artifact_ref()
+
+    save_root = args.save_dir or "."
+    os.makedirs(save_root, exist_ok=True)
+    shared_resume_path = os.path.join(save_root, ".resume_artifact_path")
+
+    if accelerator.is_main_process:
+        accelerator.print(f"[resume] Downloading W&B artifact: {artifact_ref}")
+        artifact = api.artifact(artifact_ref)
+        artifact_dir = artifact.download(root=os.path.join(save_root, ".wandb_artifacts"))
+
+        if args.resume_artifact_file:
+            checkpoint_path = os.path.join(artifact_dir, args.resume_artifact_file)
+            if not os.path.isfile(checkpoint_path):
+                raise FileNotFoundError(
+                    f"Checkpoint file '{args.resume_artifact_file}' not found in artifact '{artifact_ref}'"
+                )
+        else:
+            candidates = glob.glob(os.path.join(artifact_dir, "*.pt"))
+            if not candidates:
+                raise FileNotFoundError(f"No .pt checkpoint files found in artifact '{artifact_ref}'")
+
+            def _extract_step(path: str) -> int:
+                match = re.search(r"_(\d+)\.pt$", os.path.basename(path))
+                return int(match.group(1)) if match else -1
+
+            checkpoint_path = sorted(candidates, key=lambda p: (_extract_step(p), os.path.getmtime(p)))[-1]
+
+        with open(shared_resume_path, "w", encoding="utf-8") as f:
+            f.write(checkpoint_path)
+        accelerator.print(f"[resume] Using checkpoint from artifact: {checkpoint_path}")
+
+    accelerator.wait_for_everyone()
+    with open(shared_resume_path, "r", encoding="utf-8") as f:
+        return f.read().strip()
+
+
 def get_common_args(parser, default_save_dir: str = "checkpoints"):
     """Add common training arguments to parser."""
     # Data
@@ -289,12 +410,26 @@ def get_common_args(parser, default_save_dir: str = "checkpoints"):
     # Resume
     parser.add_argument("--resume", type=str, default=None, 
                         help="Path to checkpoint to resume from")
+    parser.add_argument("--resume_artifact_run_id", type=str, default=None,
+                        help="W&B run id to resume from saved checkpoint artifact")
+    parser.add_argument("--resume_artifact_name", type=str, default=None,
+                        help="W&B artifact name (default: <model_prefix>-<resume_artifact_run_id>)")
+    parser.add_argument("--resume_artifact_alias", type=str, default="latest",
+                        help="W&B artifact alias/version (default: latest)")
+    parser.add_argument("--resume_artifact_file", type=str, default=None,
+                        help="Checkpoint file path inside artifact (default: auto-select .pt)")
+    parser.add_argument("--resume_artifact_project", type=str, default=None,
+                        help="W&B project for artifact resume (default: --wandb_project)")
+    parser.add_argument("--resume_artifact_entity", type=str, default=None,
+                        help="W&B entity for artifact resume (default: auto-detect)")
     
     # Weights & Biases
     parser.add_argument("--wandb", action="store_true", default=False,
                         help="Enable Weights & Biases logging")
     parser.add_argument("--wandb_project", type=str, default="photon",
                         help="W&B project name")
+    parser.add_argument("--wandb_entity", type=str, default=None,
+                        help="W&B entity/team")
     parser.add_argument("--wandb_run", type=str, default=None,
                         help="W&B run name (auto-generated if not specified)")
     parser.add_argument("--wandb_id", type=str, default=None,
@@ -352,6 +487,7 @@ def init_wandb(
         
         wandb.init(
             project=args.wandb_project,
+            entity=args.wandb_entity,
             name=run_name,
             id=run_id,
             config=wandb_config,

@@ -8,6 +8,7 @@ Defaults now target the paper’s effective batch (~256 sequences) using batch_s
 
 Resume from checkpoint:
     accelerate launch --num_processes 2 train_accel_zero3.py --resume checkpoints_photon/checkpoint_1000.pt
+    accelerate launch --num_processes 2 train_accel_zero3.py --resume_artifact_run_id <run_id>
 
 This script enables multi-GPU training on 2×T4 GPUs with:
 - ZeRO-3 model sharding (fits large models)
@@ -28,7 +29,7 @@ from accelerate.utils import DeepSpeedPlugin
 from photon import PhotonConfig, PhotonLM
 from photon.data import create_dataloaders
 from train_utils import (
-    save_checkpoint, load_checkpoint_before_prepare, get_common_args,
+    save_checkpoint, load_checkpoint_before_prepare, resolve_resume_checkpoint, get_common_args,
     init_wandb, log_wandb, finish_wandb
 )
 
@@ -144,8 +145,9 @@ def main():
     
     # Resume from checkpoint if specified (BEFORE prepare for ZeRO-3)
     start_step = 0
-    if args.resume:
-        start_step = load_checkpoint_before_prepare(accelerator, model, args.resume, PhotonConfig)
+    resume_path = resolve_resume_checkpoint(accelerator, args, resume_prefix="photon")
+    if resume_path:
+        start_step = load_checkpoint_before_prepare(accelerator, model, resume_path, PhotonConfig)
     
     # Prepare model and dataloaders
     if eval_loader is not None:

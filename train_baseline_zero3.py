@@ -7,6 +7,7 @@ Launch with:
 
 Resume from checkpoint:
     accelerate launch --num_processes 2 train_baseline_zero3.py --resume checkpoints_baseline/checkpoint_1000.pt
+    accelerate launch --num_processes 2 train_baseline_zero3.py --resume_artifact_run_id <run_id>
 
 A baseline for comparison with PHOTON.
 """
@@ -22,7 +23,7 @@ from accelerate.utils import DeepSpeedPlugin
 from baseline import BaselineConfig, BaselineLM
 from photon.data import create_dataloaders
 from train_utils import (
-    save_checkpoint, load_checkpoint_before_prepare, get_common_args,
+    save_checkpoint, load_checkpoint_before_prepare, resolve_resume_checkpoint, get_common_args,
     init_wandb, log_wandb, finish_wandb
 )
 
@@ -101,8 +102,9 @@ def main():
     
     # Resume from checkpoint if specified (BEFORE prepare for ZeRO-3)
     start_step = 0
-    if args.resume:
-        start_step = load_checkpoint_before_prepare(accelerator, model, args.resume, BaselineConfig)
+    resume_path = resolve_resume_checkpoint(accelerator, args, resume_prefix="baseline")
+    if resume_path:
+        start_step = load_checkpoint_before_prepare(accelerator, model, resume_path, BaselineConfig)
     
     # Prepare model and dataloaders
     if eval_loader is not None:
