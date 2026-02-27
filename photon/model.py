@@ -792,14 +792,7 @@ class PhotonLM(nn.Module):
             # Shift for next-token prediction
             shift_logits = logits[:, :-1, :].contiguous()
             shift_labels = labels[:, 1:].contiguous()
-            
-            # Handle EOS masking
-            if cfg.eos_token_id is not None:
-                # Create mask that zeros out loss after EOS
-                eos_mask = self._create_eos_mask(shift_labels, cfg.eos_token_id)
-                shift_labels = shift_labels.clone()
-                shift_labels[~eos_mask] = -100
-            
+
             loss_lm = F.cross_entropy(
                 shift_logits.view(-1, cfg.vocab_size),
                 shift_labels.view(-1),
@@ -825,20 +818,6 @@ class PhotonLM(nn.Module):
             out["x2"] = x2
         
         return out
-    
-    def _create_eos_mask(self, labels: torch.Tensor, eos_id: int) -> torch.Tensor:
-        """Create mask that is True before (and including) first EOS."""
-        B, T = labels.shape
-        is_eos = labels == eos_id
-        
-        # Cumsum to find positions after first EOS
-        eos_cumsum = is_eos.cumsum(dim=1)
-        
-        # Mask is True where cumsum <= 1 (before or at first EOS)
-        # But we want to include the EOS itself in training
-        mask = eos_cumsum <= 1
-        
-        return mask
     
     def get_last_latents(self, input_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
