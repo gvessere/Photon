@@ -84,9 +84,18 @@ def main():
     # Initialize wandb
     wandb_active = init_wandb(accelerator, args, "baseline", cfg, n_params)
     
-    # Load dataset
+    # Resume from checkpoint if specified (BEFORE prepare for ZeRO-3)
+    start_step = 0
+    resume_path = resolve_resume_checkpoint(accelerator, args, resume_prefix="baseline")
+    if resume_path:
+        start_step = load_checkpoint_before_prepare(accelerator, model, resume_path, BaselineConfig)
+
+    # Load dataset (fast-forward train stream when resuming)
+    train_skip_examples = start_step * args.batch_size * accelerator.num_processes
     with accelerator.main_process_first():
         accelerator.print("Loading dataset...")
+        if train_skip_examples > 0:
+            accelerator.print(f"[resume] Skipping {train_skip_examples} processed train examples")
         train_loader, eval_loader, tokenizer = create_dataloaders(
             dataset_name=args.dataset,
             tokenizer_name=args.tokenizer,
@@ -95,16 +104,11 @@ def main():
             streaming=True,
             eval_split=args.eval_split if args.eval_split else None,
             eval_from_train_examples=args.eval_from_train_examples,
+            train_skip_examples=train_skip_examples,
         )
         cfg.eos_token_id = tokenizer.eos_token_id
         cfg.pad_token_id = tokenizer.pad_token_id
         cfg.vocab_size = len(tokenizer)
-    
-    # Resume from checkpoint if specified (BEFORE prepare for ZeRO-3)
-    start_step = 0
-    resume_path = resolve_resume_checkpoint(accelerator, args, resume_prefix="baseline")
-    if resume_path:
-        start_step = load_checkpoint_before_prepare(accelerator, model, resume_path, BaselineConfig)
     
     # Prepare model and dataloaders
     if eval_loader is not None:
