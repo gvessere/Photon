@@ -391,7 +391,7 @@ def get_common_args(parser, default_save_dir: str = "checkpoints"):
     parser.add_argument("--batch_size", type=int, default=3)
     
     # Training
-    parser.add_argument("--steps", type=int, default=40000)
+    parser.add_argument("--steps", type=int, default=100000)
     # With 2 processes and batch_size=3, grad_accum=43 -> ~258 effective (≈256 target)
     parser.add_argument("--grad_accum", type=int, default=43)
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
