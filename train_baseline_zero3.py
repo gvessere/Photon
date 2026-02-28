@@ -24,7 +24,7 @@ from baseline import BaselineConfig, BaselineLM
 from photon.data import create_dataloaders
 from train_utils import (
     save_checkpoint, load_checkpoint_before_prepare, resolve_resume_checkpoint, get_common_args,
-    init_wandb, log_wandb, finish_wandb
+    init_wandb, log_wandb, finish_wandb, capture_data_state, restore_data_state
 )
 
 
@@ -86,16 +86,16 @@ def main():
     
     # Resume from checkpoint if specified (BEFORE prepare for ZeRO-3)
     start_step = 0
+    data_state = None
     resume_path = resolve_resume_checkpoint(accelerator, args, resume_prefix="baseline")
     if resume_path:
-        start_step = load_checkpoint_before_prepare(accelerator, model, resume_path, BaselineConfig)
+        start_step, data_state = load_checkpoint_before_prepare(
+            accelerator, model, resume_path, BaselineConfig
+        )
 
-    # Load dataset (fast-forward train stream when resuming)
-    train_skip_examples = start_step * args.batch_size * accelerator.num_processes
+    # Load dataset
     with accelerator.main_process_first():
         accelerator.print("Loading dataset...")
-        if train_skip_examples > 0:
-            accelerator.print(f"[resume] Skipping {train_skip_examples} processed train examples")
         train_loader, eval_loader, tokenizer = create_dataloaders(
             dataset_name=args.dataset,
             tokenizer_name=args.tokenizer,
@@ -104,7 +104,6 @@ def main():
             streaming=True,
             eval_split=args.eval_split if args.eval_split else None,
             eval_from_train_examples=args.eval_from_train_examples,
-            train_skip_examples=train_skip_examples,
         )
         cfg.eos_token_id = tokenizer.eos_token_id
         cfg.pad_token_id = tokenizer.pad_token_id
@@ -115,6 +114,9 @@ def main():
         model, train_loader, eval_loader = accelerator.prepare(model, train_loader, eval_loader)
     else:
         model, train_loader = accelerator.prepare(model, train_loader)
+
+    # Restore loader cursor state after prepare() when supported.
+    restore_data_state(accelerator, train_loader, data_state)
     
     accelerator.print("Starting training...")
     
@@ -177,6 +179,7 @@ def main():
         
         # Checkpointing
         if args.save_dir and step % args.save_every == 0:
+            data_state = capture_data_state(accelerator, train_loader)
             save_checkpoint(
                 accelerator=accelerator,
                 model=model,
@@ -185,6 +188,7 @@ def main():
                 save_dir=args.save_dir,
                 prefix="baseline",
                 keep_last=args.keep_last,
+                data_state=data_state,
             )
     
     # Finish wandb

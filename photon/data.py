@@ -106,7 +106,6 @@ def create_dataloaders(
     train_split: str = "train",
     eval_split: Optional[str] = None,
     eval_from_train_examples: int = 10000,
-    train_skip_examples: int = 0,
 ) -> tuple:
     """
     Create train and eval dataloaders.
@@ -122,8 +121,6 @@ def create_dataloaders(
         eval_split: Eval split name. If missing in dataset, derive eval from train split.
         eval_from_train_examples: Number of examples to reserve for eval when
             eval_split is unavailable and streaming=True.
-        train_skip_examples: Number of token-block training examples to skip
-            from the start of the processed train stream (used for resume).
     
     Returns:
         (train_loader, eval_loader, tokenizer)
@@ -167,13 +164,6 @@ def create_dataloaders(
     # Group into blocks
     group_partial = partial(group_texts, block_size=block_size, eos_token_id=eos_token_id)
     lm_dataset = tokenized.map(group_partial, batched=True)
-
-    # Fast-forward processed train stream for checkpoint resume.
-    if train_skip_examples > 0:
-        if hasattr(lm_dataset, "skip"):
-            lm_dataset = lm_dataset.skip(train_skip_examples)
-        else:
-            raise ValueError("train_skip_examples requires a dataset supporting .skip()")
     
     # Create dataloader
     train_loader = DataLoader(

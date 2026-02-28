@@ -11,9 +11,10 @@ Common functionality:
 import os
 import re
 import glob
-from typing import Optional, Any, Dict
+from typing import Optional, Any, Dict, Tuple
 
 import torch
+import torch.distributed as dist
 from accelerate import Accelerator
 
 # Optional wandb import
@@ -32,6 +33,7 @@ def save_checkpoint(
     save_dir: str,
     prefix: str = "checkpoint",
     keep_last: int = 5,
+    data_state: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """
     Save checkpoint with ZeRO-3 compatible weight gathering.
@@ -45,6 +47,7 @@ def save_checkpoint(
         save_dir: Directory to save to
         prefix: Filename prefix
         keep_last: Number of recent checkpoints to keep (0 = keep all)
+        data_state: Optional dataloader/dataset cursor state for fast resume
     
     Returns:
         Path to saved checkpoint (on main process) or None
@@ -55,6 +58,17 @@ def save_checkpoint(
     # Gather all ZeRO-3 shards
     state_dict = accelerator.get_state_dict(model)
     
+    # Collect per-rank data cursor states for distributed resume correctness.
+    data_state_by_rank = None
+    if data_state is not None and dist.is_available() and dist.is_initialized():
+        try:
+            world_size = dist.get_world_size()
+            gathered = [None] * world_size
+            dist.all_gather_object(gathered, data_state)
+            data_state_by_rank = gathered
+        except Exception as e:
+            accelerator.print(f"[resume] Could not gather per-rank data state: {e}")
+
     ckpt_path = None
     if accelerator.is_main_process:
         ckpt_path = os.path.join(save_dir, f"{prefix}_{step}.pt")
@@ -63,6 +77,10 @@ def save_checkpoint(
             "model": state_dict,
             "config": config,
         }
+        if data_state is not None:
+            payload["data_state"] = data_state
+        if data_state_by_rank is not None:
+            payload["data_state_by_rank"] = data_state_by_rank
         # Store wandb metadata if available
         try:
             import wandb  # type: ignore
@@ -167,7 +185,7 @@ def load_checkpoint(
     model: torch.nn.Module,
     checkpoint_path: str,
     config_class: type,
-) -> int:
+) -> Tuple[int, Optional[Dict[str, Any]]]:
     """
     Load checkpoint and return the step number.
     
@@ -178,7 +196,7 @@ def load_checkpoint(
         config_class: Config class to add to safe globals
     
     Returns:
-        Step number from checkpoint
+        Tuple of (step number, optional data cursor state)
     """
     accelerator.print(f"Loading checkpoint: {checkpoint_path}")
     
@@ -202,9 +220,10 @@ def load_checkpoint(
     unwrapped.load_state_dict(state_dict, strict=False)
     
     step = ckpt.get("step", 0)
+    data_state = _extract_local_data_state(accelerator, ckpt)
     accelerator.print(f"Resumed from step {step}")
     
-    return step
+    return step, data_state
 
 
 def load_checkpoint_before_prepare(
@@ -212,7 +231,7 @@ def load_checkpoint_before_prepare(
     model: torch.nn.Module,
     checkpoint_path: str,
     config_class: type,
-) -> int:
+) -> Tuple[int, Optional[Dict[str, Any]]]:
     """
     Load checkpoint BEFORE accelerator.prepare() for ZeRO-3 compatibility.
     
@@ -226,7 +245,7 @@ def load_checkpoint_before_prepare(
         config_class: Config class to add to safe globals
     
     Returns:
-        Step number from checkpoint
+        Tuple of (step number, optional data cursor state)
     """
     accelerator.print(f"Loading checkpoint: {checkpoint_path}")
     
@@ -255,9 +274,96 @@ def load_checkpoint_before_prepare(
         accelerator.print(f"Unexpected keys: {len(unexpected)}")
     
     step = ckpt.get("step", 0)
+    data_state = _extract_local_data_state(accelerator, ckpt)
     accelerator.print(f"Resumed from step {step}")
     
-    return step
+    return step, data_state
+
+
+def capture_data_state(
+    accelerator: Accelerator,
+    train_loader: Any,
+) -> Optional[Dict[str, Any]]:
+    """
+    Best-effort capture of dataloader/dataset cursor state for fast resume.
+    """
+    try:
+        if hasattr(train_loader, "state_dict"):
+            state = train_loader.state_dict()
+            if isinstance(state, dict) and state:
+                return state
+    except Exception as e:
+        accelerator.print(f"[resume] Could not capture dataloader state: {e}")
+
+    try:
+        dataset = getattr(train_loader, "dataset", None)
+        if dataset is not None and hasattr(dataset, "state_dict"):
+            state = dataset.state_dict()
+            if isinstance(state, dict) and state:
+                return state
+    except Exception as e:
+        accelerator.print(f"[resume] Could not capture dataset state: {e}")
+
+    return None
+
+
+def _extract_local_data_state(
+    accelerator: Accelerator,
+    ckpt: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """
+    Return this rank's data cursor state from checkpoint payload.
+    """
+    by_rank = ckpt.get("data_state_by_rank", None)
+    if isinstance(by_rank, list):
+        rank = accelerator.process_index
+        if rank < len(by_rank):
+            state = by_rank[rank]
+            if isinstance(state, dict):
+                return state
+        accelerator.print(
+            f"[resume] Missing per-rank data state for rank {rank}; falling back to shared state"
+        )
+
+    shared = ckpt.get("data_state", None)
+    if accelerator.num_processes > 1 and shared is not None:
+        accelerator.print(
+            "[resume] Checkpoint has only shared data_state; ignoring in multi-process to avoid rank desync"
+        )
+        return None
+    return shared if isinstance(shared, dict) else None
+
+
+def restore_data_state(
+    accelerator: Accelerator,
+    train_loader: Any,
+    data_state: Optional[Dict[str, Any]],
+) -> bool:
+    """
+    Best-effort restore of dataloader/dataset cursor state from checkpoint.
+    """
+    if not data_state:
+        return False
+
+    try:
+        if hasattr(train_loader, "load_state_dict"):
+            train_loader.load_state_dict(data_state)
+            accelerator.print("[resume] Restored dataloader cursor state from checkpoint")
+            return True
+    except Exception as e:
+        accelerator.print(f"[resume] Could not restore dataloader state: {e}")
+
+    try:
+        dataset = getattr(train_loader, "dataset", None)
+        if dataset is not None and hasattr(dataset, "load_state_dict"):
+            dataset.load_state_dict(data_state)
+            accelerator.print("[resume] Restored dataset cursor state from checkpoint")
+            return True
+    except Exception as e:
+        accelerator.print(f"[resume] Could not restore dataset state: {e}")
+
+    accelerator.print("[resume] Data cursor state present but unsupported by current dataloader stack")
+    return False
 
 
 def resolve_resume_checkpoint(
