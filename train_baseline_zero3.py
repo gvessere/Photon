@@ -124,6 +124,8 @@ def main():
     model.train()
     it = iter(train_loader)
     running_loss = 0.0
+    # Per-rank cumulative tokens; reduced across ranks when logging.
+    tokens_seen_local = start_step * args.batch_size * args.max_seq_len
     
     for step in range(start_step + 1, args.steps + 1):
         # Get batch
@@ -140,14 +142,34 @@ def main():
             accelerator.backward(loss)
         
         running_loss += loss.item()
+        tokens_seen_local += batch["labels"].numel()
         
         # Logging
+        if step % args.log_every == 0:
+            optimizer_step = step // args.grad_accum
+            tokens_seen_global = int(
+                accelerator.reduce(
+                    torch.tensor(tokens_seen_local, device=accelerator.device, dtype=torch.long),
+                    reduction="sum",
+                ).item()
+            )
         if accelerator.is_main_process and step % args.log_every == 0:
             avg_loss = running_loss / args.log_every
-            accelerator.print(f"step {step:6d} | loss {avg_loss:.4f}")
+            accelerator.print(
+                f"step {step:6d} | opt {optimizer_step:6d} | tok {tokens_seen_global:,} | loss {avg_loss:.4f}"
+            )
             
             # Log to wandb
-            log_wandb(accelerator, {"train/loss_lm": avg_loss}, step, wandb_active)
+            log_wandb(
+                accelerator,
+                {
+                    "train/loss_lm": avg_loss,
+                    "train/optimizer_step": optimizer_step,
+                    "train/tokens_seen": tokens_seen_global,
+                },
+                step,
+                wandb_active,
+            )
             
             running_loss = 0.0
 
@@ -155,6 +177,13 @@ def main():
         if eval_loader is not None and step % args.eval_every == 0:
             model.eval()
             total_loss, total_tokens = 0.0, 0
+            optimizer_step = step // args.grad_accum
+            tokens_seen_global = int(
+                accelerator.reduce(
+                    torch.tensor(tokens_seen_local, device=accelerator.device, dtype=torch.long),
+                    reduction="sum",
+                ).item()
+            )
 
             with torch.no_grad():
                 for i, eval_batch in enumerate(eval_loader):
@@ -173,6 +202,8 @@ def main():
                 log_wandb(accelerator, {
                     "eval/loss": mean_loss,
                     "eval/ppl": ppl,
+                    "eval/optimizer_step": optimizer_step,
+                    "eval/tokens_seen": tokens_seen_global,
                 }, step, wandb_active)
 
             model.train()

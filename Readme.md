@@ -137,5 +137,5 @@ Photon/
 
 ## References
 
-- [PHOTON Paper](https://arxiv.org/abs/2501.xxxxx) - Ichikawa et al. 2025
+- [PHOTON Paper](http://arxiv.org/abs/2512.20687) - Ichikawa et al. 2025
 - [Block Transformer](https://arxiv.org/abs/2401.02234) - Related hierarchical approach

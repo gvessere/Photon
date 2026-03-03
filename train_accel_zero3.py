@@ -170,6 +170,8 @@ def main():
     running_loss_rec = 0.0
     running_loss_ctx = 0.0
     running_loss_lm = 0.0
+    # Per-rank cumulative tokens; reduced across ranks when logging.
+    tokens_seen_local = start_step * args.batch_size * args.block_size
     
     for step in range(start_step + 1, args.steps + 1):
         # Get batch
@@ -189,6 +191,7 @@ def main():
         running_loss_rec += out.get("loss_rec", torch.tensor(0.0)).item()
         running_loss_ctx += out.get("loss_ctx", torch.tensor(0.0)).item()
         running_loss_lm += out.get("loss_lm", torch.tensor(0.0)).item()
+        tokens_seen_local += batch["labels"].numel()
         if args.log_latent_stats:
             x2 = out["x2"].float()
             x1 = out["x1"]
@@ -204,12 +207,23 @@ def main():
             x1_std = x1.std(dim=1).mean().item()
         
         # Logging
+        if step % args.log_every == 0:
+            optimizer_step = step // args.grad_accum
+            tokens_seen_global = int(
+                accelerator.reduce(
+                    torch.tensor(tokens_seen_local, device=accelerator.device, dtype=torch.long),
+                    reduction="sum",
+                ).item()
+            )
         if accelerator.is_main_process and step % args.log_every == 0:
             avg_loss = running_loss / args.log_every
             avg_rec = running_loss_rec / args.log_every
             avg_ctx = running_loss_ctx / args.log_every
             avg_lm = running_loss_lm / args.log_every
-            accelerator.print(f"step {step:6d} | loss {avg_loss:.4f} | rec {avg_rec:.4f} | ctx {avg_ctx:.4f} | lm {avg_lm:.4f}")
+            accelerator.print(
+                f"step {step:6d} | opt {optimizer_step:6d} | tok {tokens_seen_global:,} | "
+                f"loss {avg_loss:.4f} | rec {avg_rec:.4f} | ctx {avg_ctx:.4f} | lm {avg_lm:.4f}"
+            )
             
             # Log to wandb
             log_payload = {
@@ -217,6 +231,8 @@ def main():
                 "train/loss_rec": avg_rec,
                 "train/loss_ctx": avg_ctx,
                 "train/loss_lm": avg_lm,
+                "train/optimizer_step": optimizer_step,
+                "train/tokens_seen": tokens_seen_global,
             }
             if args.log_latent_stats:
                 log_payload["train/x2_var"] = x2_var
@@ -238,6 +254,13 @@ def main():
         if eval_loader is not None and step % args.eval_every == 0:
             model.eval()
             total_loss, total_tokens = 0.0, 0
+            optimizer_step = step // args.grad_accum
+            tokens_seen_global = int(
+                accelerator.reduce(
+                    torch.tensor(tokens_seen_local, device=accelerator.device, dtype=torch.long),
+                    reduction="sum",
+                ).item()
+            )
             
             with torch.no_grad():
                 for i, eval_batch in enumerate(eval_loader):
@@ -256,6 +279,8 @@ def main():
                 log_wandb(accelerator, {
                     "eval/loss": mean_loss,
                     "eval/ppl": ppl,
+                    "eval/optimizer_step": optimizer_step,
+                    "eval/tokens_seen": tokens_seen_global,
                 }, step, wandb_active)
             
             model.train()
