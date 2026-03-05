@@ -505,6 +505,18 @@ def get_common_args(parser, default_save_dir: str = "checkpoints"):
     # Logging & Checkpointing
     parser.add_argument("--log_every", type=int, default=50)
     parser.add_argument("--eval_every", type=int, default=500)
+    parser.add_argument("--eval_max_batches", type=int, default=100,
+                        help="Maximum number of batches to evaluate per validation dataset")
+    parser.add_argument("--eval_wikitext", dest="eval_wikitext", action="store_true", default=True,
+                        help="Run an additional perplexity eval on WikiText during validation (default: on)")
+    parser.add_argument("--no_eval_wikitext", dest="eval_wikitext", action="store_false",
+                        help="Disable additional WikiText perplexity eval during validation")
+    parser.add_argument("--wikitext_dataset", type=str, default="Salesforce/wikitext",
+                        help="HF dataset id for WikiText eval")
+    parser.add_argument("--wikitext_config", type=str, default="wikitext-103-raw-v1",
+                        help="HF config name for WikiText eval dataset")
+    parser.add_argument("--wikitext_split", type=str, default="validation",
+                        help="Split for WikiText eval")
     parser.add_argument("--save_every", type=int, default=500)
     parser.add_argument("--save_dir", type=str, default=default_save_dir)
     parser.add_argument("--keep_last", type=int, default=5,
@@ -581,6 +593,11 @@ def init_wandb(
             "effective_batch": args.batch_size * args.grad_accum * accelerator.num_processes,
             "steps": args.steps,
             "dataset": args.dataset,
+            "eval_max_batches": args.eval_max_batches,
+            "eval_wikitext": bool(args.eval_wikitext),
+            "wikitext_dataset": args.wikitext_dataset,
+            "wikitext_config": args.wikitext_config,
+            "wikitext_split": args.wikitext_split,
         }
         
         # Add model config fields

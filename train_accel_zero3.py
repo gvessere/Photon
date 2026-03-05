@@ -27,7 +27,7 @@ from accelerate.utils import DeepSpeedPlugin
 
 # Import PHOTON modules
 from photon import PhotonConfig, PhotonLM
-from photon.data import create_dataloaders
+from photon.data import create_dataloaders, create_eval_dataloader
 from train_utils import (
     save_checkpoint, load_checkpoint_before_prepare, resolve_resume_checkpoint, get_common_args,
     init_wandb, log_wandb, finish_wandb, capture_data_state, restore_data_state
@@ -136,6 +136,21 @@ def main():
             accelerator, model, resume_path, PhotonConfig
         )
 
+    def run_eval(loader, max_batches):
+        total_loss, total_tokens = 0.0, 0
+        with torch.no_grad():
+            for i, eval_batch in enumerate(loader):
+                if i >= max_batches:
+                    break
+                out = model(**eval_batch)
+                total_loss += out["loss"].item() * eval_batch["labels"].numel()
+                total_tokens += eval_batch["labels"].numel()
+        if total_tokens == 0:
+            return None, None
+        mean_loss = total_loss / total_tokens
+        ppl = math.exp(min(mean_loss, 100))
+        return mean_loss, ppl
+
     # Create dataloaders
     with accelerator.main_process_first():
         accelerator.print("Loading dataset...")
@@ -151,10 +166,30 @@ def main():
         cfg.eos_token_id = tokenizer.eos_token_id
         cfg.pad_token_id = tokenizer.pad_token_id
         cfg.vocab_size = len(tokenizer)
+        wikitext_eval_loader = None
+        if args.eval_wikitext:
+            accelerator.print(
+                f"Loading WikiText eval: {args.wikitext_dataset}/{args.wikitext_config} [{args.wikitext_split}]"
+            )
+            wikitext_eval_loader = create_eval_dataloader(
+                dataset_name=args.wikitext_dataset,
+                config_name=args.wikitext_config if args.wikitext_config else None,
+                tokenizer=tokenizer,
+                block_size=args.block_size,
+                batch_size=args.batch_size,
+                split=args.wikitext_split,
+                streaming=True,
+            )
     
     # Prepare model and dataloaders
-    if eval_loader is not None:
+    if eval_loader is not None and wikitext_eval_loader is not None:
+        model, train_loader, eval_loader, wikitext_eval_loader = accelerator.prepare(
+            model, train_loader, eval_loader, wikitext_eval_loader
+        )
+    elif eval_loader is not None:
         model, train_loader, eval_loader = accelerator.prepare(model, train_loader, eval_loader)
+    elif wikitext_eval_loader is not None:
+        model, train_loader, wikitext_eval_loader = accelerator.prepare(model, train_loader, wikitext_eval_loader)
     else:
         model, train_loader = accelerator.prepare(model, train_loader)
 
@@ -251,9 +286,8 @@ def main():
             running_loss_lm = 0.0
         
         # Evaluation
-        if eval_loader is not None and step % args.eval_every == 0:
+        if (eval_loader is not None or wikitext_eval_loader is not None) and step % args.eval_every == 0:
             model.eval()
-            total_loss, total_tokens = 0.0, 0
             optimizer_step = step // args.grad_accum
             tokens_seen_global = int(
                 accelerator.reduce(
@@ -261,27 +295,30 @@ def main():
                     reduction="sum",
                 ).item()
             )
-            
-            with torch.no_grad():
-                for i, eval_batch in enumerate(eval_loader):
-                    if i >= 100:
-                        break
-                    out = model(**eval_batch)
-                    total_loss += out["loss"].item() * eval_batch["labels"].numel()
-                    total_tokens += eval_batch["labels"].numel()
-            
-            if total_tokens > 0:
-                mean_loss = total_loss / total_tokens
-                ppl = math.exp(min(mean_loss, 100))
-                accelerator.print(f"[eval] step {step} | loss {mean_loss:.4f} | ppl {ppl:.2f}")
-                
-                # Log to wandb
-                log_wandb(accelerator, {
-                    "eval/loss": mean_loss,
-                    "eval/ppl": ppl,
-                    "eval/optimizer_step": optimizer_step,
-                    "eval/tokens_seen": tokens_seen_global,
-                }, step, wandb_active)
+
+            if eval_loader is not None:
+                mean_loss, ppl = run_eval(eval_loader, args.eval_max_batches)
+                if mean_loss is not None:
+                    accelerator.print(f"[eval] step {step} | loss {mean_loss:.4f} | ppl {ppl:.2f}")
+                    log_wandb(accelerator, {
+                        "eval/loss": mean_loss,
+                        "eval/ppl": ppl,
+                        "eval/optimizer_step": optimizer_step,
+                        "eval/tokens_seen": tokens_seen_global,
+                    }, step, wandb_active)
+
+            if wikitext_eval_loader is not None:
+                wt_loss, wt_ppl = run_eval(wikitext_eval_loader, args.eval_max_batches)
+                if wt_loss is not None:
+                    accelerator.print(
+                        f"[eval:wikitext] step {step} | loss {wt_loss:.4f} | ppl {wt_ppl:.2f}"
+                    )
+                    log_wandb(accelerator, {
+                        "eval_wikitext/loss": wt_loss,
+                        "eval_wikitext/ppl": wt_ppl,
+                        "eval_wikitext/optimizer_step": optimizer_step,
+                        "eval_wikitext/tokens_seen": tokens_seen_global,
+                    }, step, wandb_active)
             
             model.train()
         

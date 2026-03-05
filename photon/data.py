@@ -96,6 +96,50 @@ def collate_fn(batch: List[Dict[str, List[int]]]) -> Dict[str, torch.Tensor]:
     return {"input_ids": input_ids, "labels": labels}
 
 
+def _tokenize_and_group_dataset(dataset, tokenize_partial, group_partial):
+    remove_columns = ["text", "meta"] if "meta" in dataset.column_names else ["text"]
+    tokenized = dataset.map(
+        tokenize_partial,
+        batched=True,
+        remove_columns=remove_columns,
+    )
+    return tokenized.map(group_partial, batched=True)
+
+
+def create_eval_dataloader(
+    dataset_name: str,
+    tokenizer,
+    block_size: int,
+    batch_size: int,
+    split: str = "validation",
+    streaming: bool = True,
+    num_workers: int = 0,
+    config_name: Optional[str] = None,
+):
+    """Create a standalone eval dataloader for a dataset/split."""
+    from datasets import load_dataset
+
+    eos_token_id = tokenizer.eos_token_id
+    tokenize_partial = partial(tokenize_fn, tokenizer=tokenizer, max_length=block_size)
+    group_partial = partial(group_texts, block_size=block_size, eos_token_id=eos_token_id)
+
+    load_kwargs = {
+        "split": split,
+        "streaming": streaming,
+    }
+    if config_name:
+        load_kwargs["name"] = config_name
+
+    eval_dataset = load_dataset(dataset_name, **load_kwargs)
+    eval_lm = _tokenize_and_group_dataset(eval_dataset, tokenize_partial, group_partial)
+    return DataLoader(
+        eval_lm,
+        batch_size=batch_size,
+        collate_fn=collate_fn,
+        num_workers=num_workers,
+    )
+
+
 def create_dataloaders(
     dataset_name: str = "EleutherAI/the_pile_deduplicated",
     tokenizer_name: str = "mistralai/Mistral-7B-v0.1",
@@ -155,15 +199,8 @@ def create_dataloaders(
     
     # Tokenize
     tokenize_partial = partial(tokenize_fn, tokenizer=tokenizer, max_length=block_size)
-    tokenized = train_dataset.map(
-        tokenize_partial,
-        batched=True,
-        remove_columns=["text", "meta"] if "meta" in train_dataset.column_names else ["text"]
-    )
-    
-    # Group into blocks
     group_partial = partial(group_texts, block_size=block_size, eos_token_id=eos_token_id)
-    lm_dataset = tokenized.map(group_partial, batched=True)
+    lm_dataset = _tokenize_and_group_dataset(train_dataset, tokenize_partial, group_partial)
     
     # Create dataloader
     train_loader = DataLoader(
@@ -178,12 +215,7 @@ def create_dataloaders(
             "Evaluation dataset could not be created. Set --eval_split or provide a dataset with a valid eval split."
         )
 
-    eval_tokenized = eval_dataset.map(
-        tokenize_partial,
-        batched=True,
-        remove_columns=["text", "meta"] if "meta" in eval_dataset.column_names else ["text"]
-    )
-    eval_lm = eval_tokenized.map(group_partial, batched=True)
+    eval_lm = _tokenize_and_group_dataset(eval_dataset, tokenize_partial, group_partial)
     eval_loader = DataLoader(
         eval_lm,
         batch_size=batch_size,
