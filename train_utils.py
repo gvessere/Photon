@@ -366,6 +366,146 @@ def restore_data_state(
     return False
 
 
+def wandb_resolve_artifact_ref_string(
+    api: Any,
+    *,
+    run_id: str,
+    artifact_name: str,
+    alias: str,
+    entity: Optional[str],
+    project: Optional[str],
+) -> str:
+    """
+    Resolve a W&B artifact reference string (entity/project/name:alias or variants)
+    using the same discovery rules as distributed resume.
+    """
+    if entity and project:
+        full = f"{entity}/{project}/{artifact_name}:{alias}"
+        try:
+            api.artifact(full)
+            return full
+        except Exception:
+            pass
+
+    refs_to_try = [f"{artifact_name}:{alias}"]
+    if project:
+        refs_to_try.insert(0, f"{project}/{artifact_name}:{alias}")
+    if entity and project:
+        refs_to_try.insert(0, f"{entity}/{project}/{artifact_name}:{alias}")
+
+    last_err = None
+    for ref in refs_to_try:
+        try:
+            api.artifact(ref)
+            return ref
+        except Exception as e:
+            last_err = e
+
+    if entity:
+        try:
+            projects = api.projects(entity=entity)
+            for p in projects:
+                project_name = getattr(p, "name", None)
+                if not project_name:
+                    continue
+                runs = api.runs(f"{entity}/{project_name}", filters={"id": run_id}, per_page=1)
+                if runs and len(runs) > 0:
+                    return f"{entity}/{project_name}/{artifact_name}:{alias}"
+        except Exception as e:
+            last_err = e
+
+    hint = (
+        f"Could not resolve artifact for run id '{run_id}'. "
+        "Set WANDB_ENTITY / --wandb_entity and project, or pass a full --wandb-artifact ref."
+    )
+    if last_err is not None:
+        raise RuntimeError(f"{hint} Last error: {last_err}") from last_err
+    raise RuntimeError(hint)
+
+
+def wandb_pick_checkpoint_in_artifact_dir(artifact_dir: str, artifact_file: Optional[str]) -> str:
+    """Pick a single .pt file from a downloaded artifact directory."""
+    if artifact_file:
+        checkpoint_path = os.path.join(artifact_dir, artifact_file)
+        if not os.path.isfile(checkpoint_path):
+            raise FileNotFoundError(
+                f"Checkpoint file '{artifact_file}' not found under {artifact_dir}"
+            )
+        return checkpoint_path
+
+    candidates = glob.glob(os.path.join(artifact_dir, "*.pt"))
+    if not candidates:
+        raise FileNotFoundError(f"No .pt checkpoint files found under {artifact_dir}")
+
+    def _extract_step(path: str) -> int:
+        match = re.search(r"_(\d+)\.pt$", os.path.basename(path))
+        return int(match.group(1)) if match else -1
+
+    return sorted(candidates, key=lambda p: (_extract_step(p), os.path.getmtime(p)))[-1]
+
+
+def download_wandb_checkpoint_for_inference(
+    *,
+    artifact_ref: Optional[str] = None,
+    run_id: Optional[str] = None,
+    artifact_name: Optional[str] = None,
+    artifact_alias: str = "latest",
+    artifact_file: Optional[str] = None,
+    entity: Optional[str] = None,
+    project: Optional[str] = None,
+    wandb_project: str = "photon",
+    resume_prefix: str = "photon",
+    cache_dir: str = ".wandb_inference_artifacts",
+    print_fn=print,
+) -> str:
+    """
+    Download a checkpoint artifact from W&B and return a local path to a .pt file.
+
+    Provide either ``artifact_ref`` (e.g. ``entity/proj/photon-abc:latest``) or
+    ``run_id`` (with optional ``artifact_name``; default ``{resume_prefix}-{run_id}``).
+    """
+    if not WANDB_AVAILABLE:
+        raise RuntimeError("wandb is required. Install with: pip install wandb")
+
+    if artifact_ref and run_id:
+        raise ValueError("Use only one of artifact_ref or run_id")
+
+    if not artifact_ref and not run_id:
+        raise ValueError("Provide artifact_ref or run_id")
+
+    api = wandb.Api()
+    resolved_entity = (
+        entity
+        or os.environ.get("WANDB_ENTITY")
+        or getattr(api, "default_entity", None)
+    )
+    resolved_project = project or wandb_project
+
+    if artifact_ref:
+        ref = artifact_ref
+    else:
+        assert run_id is not None
+        name = artifact_name or f"{resume_prefix}-{run_id}"
+        ref = wandb_resolve_artifact_ref_string(
+            api,
+            run_id=run_id,
+            artifact_name=name,
+            alias=artifact_alias,
+            entity=resolved_entity,
+            project=resolved_project,
+        )
+
+    safe_root = os.path.join(cache_dir, re.sub(r"[^a-zA-Z0-9_.-]+", "_", ref))
+    os.makedirs(safe_root, exist_ok=True)
+
+    print_fn(f"[wandb] Downloading artifact: {ref}")
+    artifact = api.artifact(ref)
+    artifact_dir = artifact.download(root=safe_root)
+    ckpt = wandb_pick_checkpoint_in_artifact_dir(artifact_dir, artifact_file)
+    print_fn(f"[wandb] Using checkpoint: {ckpt}")
+    return ckpt
+
+
 def resolve_resume_checkpoint(
     accelerator: Accelerator,
     args,
@@ -406,49 +546,14 @@ def resolve_resume_checkpoint(
     alias = args.resume_artifact_alias
     artifact_name = args.resume_artifact_name or f"{resume_prefix}-{run_id}"
 
-    def _resolve_artifact_ref() -> str:
-        # Fast path: explicit full reference.
-        if entity and project:
-            return f"{entity}/{project}/{artifact_name}:{alias}"
-
-        # Try progressively less/alternate-qualified refs first.
-        refs_to_try = [f"{artifact_name}:{alias}"]
-        if project:
-            refs_to_try.insert(0, f"{project}/{artifact_name}:{alias}")
-        if entity and project:
-            refs_to_try.insert(0, f"{entity}/{project}/{artifact_name}:{alias}")
-
-        last_err = None
-        for ref in refs_to_try:
-            try:
-                api.artifact(ref)
-                return ref
-            except Exception as e:
-                last_err = e
-
-        # Fallback: infer entity/project from run id under the current/default entity.
-        if entity:
-            try:
-                projects = api.projects(entity=entity)
-                for p in projects:
-                    project_name = getattr(p, "name", None)
-                    if not project_name:
-                        continue
-                    runs = api.runs(f"{entity}/{project_name}", filters={"id": run_id}, per_page=1)
-                    if runs and len(runs) > 0:
-                        return f"{entity}/{project_name}/{artifact_name}:{alias}"
-            except Exception as e:
-                last_err = e
-
-        hint = (
-            f"Could not resolve artifact for run id '{run_id}'. "
-            "If auto-discovery fails, set --resume_artifact_entity and/or --resume_artifact_project."
-        )
-        if last_err is not None:
-            raise RuntimeError(f"{hint} Last error: {last_err}") from last_err
-        raise RuntimeError(hint)
-
-    artifact_ref = _resolve_artifact_ref()
+    artifact_ref = wandb_resolve_artifact_ref_string(
+        api,
+        run_id=run_id,
+        artifact_name=artifact_name,
+        alias=alias,
+        entity=entity,
+        project=project,
+    )
 
     save_root = args.save_dir or "."
     os.makedirs(save_root, exist_ok=True)
@@ -458,23 +563,9 @@ def resolve_resume_checkpoint(
         accelerator.print(f"[resume] Downloading W&B artifact: {artifact_ref}")
         artifact = api.artifact(artifact_ref)
         artifact_dir = artifact.download(root=os.path.join(save_root, ".wandb_artifacts"))
-
-        if args.resume_artifact_file:
-            checkpoint_path = os.path.join(artifact_dir, args.resume_artifact_file)
-            if not os.path.isfile(checkpoint_path):
-                raise FileNotFoundError(
-                    f"Checkpoint file '{args.resume_artifact_file}' not found in artifact '{artifact_ref}'"
-                )
-        else:
-            candidates = glob.glob(os.path.join(artifact_dir, "*.pt"))
-            if not candidates:
-                raise FileNotFoundError(f"No .pt checkpoint files found in artifact '{artifact_ref}'")
-
-            def _extract_step(path: str) -> int:
-                match = re.search(r"_(\d+)\.pt$", os.path.basename(path))
-                return int(match.group(1)) if match else -1
-
-            checkpoint_path = sorted(candidates, key=lambda p: (_extract_step(p), os.path.getmtime(p)))[-1]
+        checkpoint_path = wandb_pick_checkpoint_in_artifact_dir(
+            artifact_dir, args.resume_artifact_file
+        )
 
         with open(shared_resume_path, "w", encoding="utf-8") as f:
             f.write(checkpoint_path)

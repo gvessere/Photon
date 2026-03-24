@@ -293,15 +293,15 @@ class TestGeneration:
             max_new_tokens=small_config.block_size,
             temperature=1.0,
             top_k=50,
-            use_latent_ar=True,
+            reencode_after_each_block=False,
         )
         
         # Should have prompt + new tokens
         assert generated.shape[1] >= prompt.shape[1]
         assert generated.shape[1] <= prompt.shape[1] + small_config.block_size
     
-    def test_generation_without_latent_ar(self, model, small_config):
-        """Generation works without latent AR (with re-encoding)."""
+    def test_generation_with_reencode_each_block(self, model, small_config):
+        """Generation works with full bottom-up re-encode after each block."""
         B = 1
         prompt = torch.randint(0, small_config.vocab_size, (B, small_config.block_size))
         
@@ -309,7 +309,7 @@ class TestGeneration:
             model=model,
             input_ids=prompt,
             max_new_tokens=small_config.block_size,
-            use_latent_ar=False,  # Re-encode mode
+            reencode_after_each_block=True,
         )
         
         assert generated.shape[1] >= prompt.shape[1]
@@ -412,7 +412,7 @@ class TestIntegration:
         with torch.no_grad():
             generated = generate_photon(
                 model, prompt, max_new_tokens=small_config.C1,
-                use_latent_ar=True
+                reencode_after_each_block=False,
             )
         
         # Encode the generated sequence

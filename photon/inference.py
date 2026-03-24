@@ -1,19 +1,46 @@
 """
 PHOTON Inference Module
 
-Recursive generation without bottom-up re-encoding:
-1. Use decoder-side reconstructions to update the coarse stream
-2. Cascade down through converters
-3. Generate tokens chunk by chunk
+Block-wise top-down generation after a **full encoder prefill** on the prompt
+(L1 chunker + L1 ctx, then L2 chunk summaries + L2 context encoder).
+
+While extending the sequence you can either:
+
+- **Prefill + RecGen (default):** keep extending the L2 stream from decoder-side
+  L1 states (no full bottom-up pass over newly generated tokens), or
+- **Re-encode after each block:** run the full encoder again on the entire token
+  prefix so L2 state always matches bottom-up encoding of all tokens so far.
 """
 
-from typing import Optional, Tuple, List
+from typing import Any, List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
 
 from .model import PhotonLM
 from .config import PhotonConfig
+
+
+def _streaming_l2_state_from_full_encode(
+    model: PhotonLM,
+    token_ids: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Any]:
+    """
+    Run the full encoder on ``token_ids`` (L1 latents → L2 chunk summaries → L2
+    context transformer) and return state for continuing top-down generation.
+
+    Returns:
+        (token_ids, a2_history, prev_l1, prev_l2, ctx2_cache)
+    """
+    x1, _x2 = model.encode(token_ids)
+    a2_history = model.enc_chunk2(x1)
+    prev_l1 = x1[:, -1, :]
+    ctx2_cache = model.enc_ctx2.init_kv_cache()
+    last_x2 = None
+    for i in range(a2_history.size(1)):
+        last_x2, ctx2_cache = model.enc_ctx2.forward_step(a2_history[:, i : i + 1, :], ctx2_cache)
+    prev_l2 = last_x2[:, -1, :]
+    return token_ids, a2_history, prev_l1, prev_l2, ctx2_cache
 
 
 @torch.no_grad()
@@ -25,24 +52,20 @@ def generate_photon(
     top_k: int = 50,
     top_p: float = 0.9,
     eos_token_id: Optional[int] = None,
+    reencode_after_each_block: bool = False,
 ) -> torch.Tensor:
     """
-    Generate tokens using PHOTON's hierarchical latent structure.
-    
-    Recursive generation:
-    1. Encode prompt to get initial latents
-    2. Decode top-down to generate tokens and decoder-side L1 reconstructions
-    3. Update coarse stream from decoder-side reconstructions (no bottom-up re-encoding)
-    
-    Args:
-        model: PhotonLM model
-        input_ids: [B, T] prompt token ids
-        max_new_tokens: Maximum new tokens to generate
-        temperature: Sampling temperature for tokens
-        top_k: Top-k sampling (0 to disable)
-        top_p: Top-p (nucleus) sampling (1.0 to disable)
-        eos_token_id: Stop generation on this token
-    
+    Generate tokens using PHOTON's hierarchical decoder.
+
+    **Default (``reencode_after_each_block=False``):** run the full encoder once on
+    the (padded) prompt, then generate blocks. The L2 coarse stream is extended
+    via RecGen (decoder L1 → L2 summaries → L2 ctx step), not by re-encoding
+    new tokens bottom-up.
+
+    **``reencode_after_each_block=True``:** after each new block, run the full
+    encoder on the entire token sequence so L2 state always matches a true
+    bottom-up encode of prompt + generated text so far.
+
     Returns:
         [B, T + new_tokens] generated sequence
     """
@@ -58,22 +81,10 @@ def generate_photon(
         pad = block - (T % block)
         input_ids = F.pad(input_ids, (0, pad), value=cfg.pad_token_id or 0)
     
-    # Initial encoding
-    x1, x2 = model.encode(input_ids)
-    
-    # Current state
-    cur_tokens = input_ids.clone()
-    
-    # Track coarse stream inputs (summaries) for RecGen updates
-    a2_history = model.enc_chunk2(x1)  # [B, M2, D]
-    prev_l1 = x1[:, -1, :]  # [B, D] - last L1 latent
-
-    # Initialize streaming cache for top-level context encoder
-    ctx2_cache = model.enc_ctx2.init_kv_cache()
-    last_x2 = None
-    for i in range(a2_history.size(1)):
-        last_x2, ctx2_cache = model.enc_ctx2.forward_step(a2_history[:, i:i+1, :], ctx2_cache)
-    prev_l2 = last_x2[:, -1, :]
+    cur_tokens, a2_history, prev_l1, prev_l2, ctx2_cache = (
+        _streaming_l2_state_from_full_encode(model, input_ids)
+    )
+    cur_tokens = cur_tokens.clone()
     
     new_tokens = []
     tokens_generated = 0
@@ -98,12 +109,17 @@ def generate_photon(
             if (block_tokens == eos_token_id).any():
                 break
         
-        # Recursive update: use decoder-side L1 reconstructions to update coarse stream
-        next_a2 = model.enc_chunk2(l1_latents)  # [B, 1, D]
-        a2_history = torch.cat([a2_history, next_a2], dim=1)
-        last_x2, ctx2_cache = model.enc_ctx2.forward_step(next_a2, ctx2_cache)
-        prev_l2 = last_x2[:, -1, :]
-        prev_l1 = l1_latents[:, -1, :]
+        if reencode_after_each_block:
+            _c, a2_history, prev_l1, prev_l2, ctx2_cache = (
+                _streaming_l2_state_from_full_encode(model, cur_tokens)
+            )
+        else:
+            # RecGen: extend L2 stream from decoder-side L1 reconstructions
+            next_a2 = model.enc_chunk2(l1_latents)  # [B, 1, D]
+            a2_history = torch.cat([a2_history, next_a2], dim=1)
+            last_x2, ctx2_cache = model.enc_ctx2.forward_step(next_a2, ctx2_cache)
+            prev_l2 = last_x2[:, -1, :]
+            prev_l1 = l1_latents[:, -1, :]
     
     # Concatenate and truncate
     generated = cur_tokens[:, :input_ids.size(1) + max_new_tokens]
@@ -326,4 +342,5 @@ def generate_with_kv_cache(
         max_new_tokens=max_new_tokens,
         temperature=temperature,
         top_k=top_k,
+        reencode_after_each_block=False,
     )
