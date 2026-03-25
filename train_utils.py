@@ -25,6 +25,26 @@ except ImportError:
     WANDB_AVAILABLE = False
 
 
+def normalize_wandb_artifact_ref(ref: str) -> str:
+    """
+    Turn UI / CLI pasted strings into the form ``api.artifact()`` expects:
+    ``entity/project/artifact_name:alias_or_version``.
+
+    W&B often copies URIs like ``artifact:///entity/project/name:v123``; the
+    leading ``artifact:`` scheme and slashes otherwise confuse the client
+    (e.g. project resolved as ``uncategorized``).
+    """
+    s = ref.strip()
+    low = s.lower()
+    if low.startswith("wandb-artifact:"):
+        s = s[len("wandb-artifact:") :].lstrip("/")
+    elif low.startswith("artifact:"):
+        s = s[len("artifact:") :].lstrip("/")
+    else:
+        s = s.lstrip("/")
+    return s.strip()
+
+
 def save_checkpoint(
     accelerator: Accelerator,
     model: torch.nn.Module,
@@ -461,8 +481,9 @@ def download_wandb_checkpoint_for_inference(
     """
     Download a checkpoint artifact from W&B and return a local path to a .pt file.
 
-    Provide either ``artifact_ref`` (e.g. ``entity/proj/photon-abc:latest``) or
-    ``run_id`` (with optional ``artifact_name``; default ``{resume_prefix}-{run_id}``).
+    Provide either ``artifact_ref`` (e.g. ``entity/proj/photon-abc:latest`` or
+    a pasted ``artifact:///entity/proj/name:v123`` URI) or ``run_id`` (with
+    optional ``artifact_name``; default ``{resume_prefix}-{run_id}``).
     """
     if not WANDB_AVAILABLE:
         raise RuntimeError("wandb is required. Install with: pip install wandb")
@@ -482,7 +503,7 @@ def download_wandb_checkpoint_for_inference(
     resolved_project = project or wandb_project
 
     if artifact_ref:
-        ref = artifact_ref
+        ref = normalize_wandb_artifact_ref(artifact_ref)
     else:
         assert run_id is not None
         name = artifact_name or f"{resume_prefix}-{run_id}"

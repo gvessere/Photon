@@ -137,11 +137,12 @@ def generate_one_block(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Generate one full block of C1*C2 tokens.
-    
+
     Uses the hierarchical structure:
-    1. Decode L2 -> C2 L1 latents (deterministic)
-    2. Decode each L1 -> C1 tokens
-    
+    1. L2 decoder: same as training — ``[dec_conv2_in(prev_l2) | C2 zero slots]`` through
+       ``dec_ctx2``, then ``dec_proj2_out`` (parallel C2 L1 predictions).
+    2. L1 decoders: autoregressive tokens within each chunk (matches training layout).
+
     Args:
         model: PhotonLM model
         prev_l1: [B, D] previous L1 latent (for first chunk)
@@ -157,37 +158,13 @@ def generate_one_block(
     B = prev_l1.size(0)
     device = prev_l1.device
     
-    # Step 1: Decode L2 -> C2 L1 latents
-    # Condition on prev_l2 using input converter
+    # Step 1: Decode L2 -> C2 L1 latents (same layout as training: cond2 then C2 zero slots)
     cond2 = model.dec_conv2_in(prev_l2)  # [B, R2, D]
-    
-    # Generate C2 L1 latents autoregressively
-    l1_latents = []
-    current_l1 = prev_l1
-    
-    for i in range(cfg.C2):
-        # Decode to get next L1 latent
-        # Use slots for prediction positions
-        slots = torch.zeros(B, 1, cfg.d_latent, device=device)
-        
-        if i == 0:
-            dec_in = torch.cat([cond2, slots], dim=1)  # [B, R2+1, D]
-        else:
-            # Include previously generated L1 latents
-            prev_l1s = torch.stack(l1_latents, dim=1)  # [B, i, D]
-            dec_in = torch.cat([cond2, prev_l1s, slots], dim=1)  # [B, R2+i+1, D]
-        
-        dec_out = model.dec_ctx2(dec_in, is_causal=True)
-        
-        # Output projection to L1 latent
-        h = dec_out[:, -1, :]  # [B, D]
-        next_l1 = model.dec_proj2_out(h)
-        
-        l1_latents.append(next_l1)
-        current_l1 = next_l1
-    
-    # l1_latents: list of [B, D], length C2
-    l1_latents = torch.stack(l1_latents, dim=1)  # [B, C2, D]
+    slots2 = torch.zeros(B, cfg.C2, cfg.d_latent, device=device, dtype=cond2.dtype)
+    dec_in2 = torch.cat([cond2, slots2], dim=1)  # [B, R2 + C2, D]
+    dec_out2 = model.dec_ctx2(dec_in2, is_causal=True)
+    pred_h = dec_out2[:, cfg.R2:, :]  # [B, C2, D], matches training pred_h
+    l1_latents = model.dec_proj2_out(pred_h)  # [B, C2, D]
     
     # Step 2: Decode each L1 latent -> C1 tokens
     all_tokens = []

@@ -178,7 +178,10 @@ def main():
         "--wandb-artifact",
         type=str,
         default=None,
-        help="Full W&B artifact ref, e.g. entity/project/photon-RUN_ID:latest",
+        help=(
+            "Artifact ref: entity/project/name:alias_or_version. "
+            "Pasted artifact:///entity/project/name:vN URIs from the UI are also accepted."
+        ),
     )
     src.add_argument(
         "--wandb-run-id",
