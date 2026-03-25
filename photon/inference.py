@@ -81,7 +81,7 @@ def generate_photon(
         pad = block - (T % block)
         input_ids = F.pad(input_ids, (0, pad), value=cfg.pad_token_id or 0)
     
-    cur_tokens, a2_history, prev_l1, prev_l2, ctx2_cache = (
+    cur_tokens, a2_history, _prev_l1_init, prev_l2, ctx2_cache = (
         _streaming_l2_state_from_full_encode(model, input_ids)
     )
     cur_tokens = cur_tokens.clone()
@@ -93,8 +93,8 @@ def generate_photon(
         # Generate C1*C2 tokens (one full block) at a time
         block_tokens, l1_latents = generate_one_block(
             model=model,
-            prev_l1=prev_l1,
             prev_l2=prev_l2,
+            cur_tokens=cur_tokens,
             temperature=temperature,
             top_k=top_k,
             top_p=top_p,
@@ -119,7 +119,6 @@ def generate_photon(
             a2_history = torch.cat([a2_history, next_a2], dim=1)
             last_x2, ctx2_cache = model.enc_ctx2.forward_step(next_a2, ctx2_cache)
             prev_l2 = last_x2[:, -1, :]
-            prev_l1 = l1_latents[:, -1, :]
     
     # Concatenate and truncate
     generated = cur_tokens[:, :input_ids.size(1) + max_new_tokens]
@@ -129,8 +128,8 @@ def generate_photon(
 
 def generate_one_block(
     model: PhotonLM,
-    prev_l1: torch.Tensor,
     prev_l2: torch.Tensor,
+    cur_tokens: torch.Tensor,
     temperature: float = 1.0,
     top_k: int = 50,
     top_p: float = 0.9,
@@ -138,40 +137,43 @@ def generate_one_block(
     """
     Generate one full block of C1*C2 tokens.
 
-    Uses the hierarchical structure:
-    1. L2 decoder: same as training — ``[dec_conv2_in(prev_l2) | C2 zero slots]`` through
-       ``dec_ctx2``, then ``dec_proj2_out`` (parallel C2 L1 predictions).
-    2. L1 decoders: autoregressive tokens within each chunk (matches training layout).
+    1. L2 decoder: ``[dec_conv2_in(prev_l2) | C2 zero slots]`` → ``dec_ctx2`` → ``dec_proj2_out``.
+
+    2. L1 token decoder: for each of ``C2`` chunks, condition on **encoder** L1 at the
+       **previous** chunk — same as training (``prev_l1[:, m] = x1[:, m-1]``).
+
+       Training never feeds ``dec_conv1`` with L2-predicted latents between chunks; it
+       uses ``x1`` from a bottom-up encode of the **true** prefix. Here we **re-encode**
+       ``cur_tokens`` (extended after each chunk) and take ``x1[:, -1]`` so the
+       conditioner matches the **generated** prefix, not ``l1_latents[:, j]`` from the
+       L2 head (which was sampled without seeing those tokens).
 
     Args:
-        model: PhotonLM model
-        prev_l1: [B, D] previous L1 latent (for first chunk)
-        prev_l2: [B, D] previous L2 latent
-        temperature: Token sampling temperature
-        top_k: Top-k sampling
-        top_p: Top-p sampling
-    
+        prev_l2: [B, D] L2 state for this block's L2 decoder.
+        cur_tokens: [B, T] full token ids **before** this block (length divisible by ``C1``).
+
     Returns:
-        ([B, C1*C2] generated tokens, [B, C2, D] L1 latents)
+        ([B, C1*C2] generated tokens, [B, C2, D] L1 latents for RecGen)
     """
     cfg = model.cfg
-    B = prev_l1.size(0)
-    device = prev_l1.device
-    
-    # Step 1: Decode L2 -> C2 L1 latents (same layout as training: cond2 then C2 zero slots)
+    B = prev_l2.size(0)
+    device = prev_l2.device
+
+    # Step 1: L2 → C2 predicted L1 latents (for RecGen after the block; not for L1 cond)
     cond2 = model.dec_conv2_in(prev_l2)  # [B, R2, D]
     slots2 = torch.zeros(B, cfg.C2, cfg.d_latent, device=device, dtype=cond2.dtype)
     dec_in2 = torch.cat([cond2, slots2], dim=1)  # [B, R2 + C2, D]
     dec_out2 = model.dec_ctx2(dec_in2, is_causal=True)
-    pred_h = dec_out2[:, cfg.R2:, :]  # [B, C2, D], matches training pred_h
+    pred_h = dec_out2[:, cfg.R2:, :]  # [B, C2, D]
     l1_latents = model.dec_proj2_out(pred_h)  # [B, C2, D]
-    
-    # Step 2: Decode each L1 latent -> C1 tokens
+
+    # Step 2: C2 × (C1 tokens); conditioner = encoder summary of **previous** C1 window
     all_tokens = []
-    prev_l1_for_chunk = prev_l1  # Start with the passed-in prev_l1
-    
-    for j in range(cfg.C2):
-        # Generate C1 tokens from L1 latent j
+    cur = cur_tokens.clone()
+
+    for _j in range(cfg.C2):
+        x1, _ = model.encode(cur)
+        prev_l1_for_chunk = x1[:, -1, :]  # same role as x1[:, m-1] for next chunk m
         chunk_tokens = generate_token_chunk(
             model=model,
             prev_l1=prev_l1_for_chunk,
@@ -180,13 +182,9 @@ def generate_one_block(
             top_p=top_p,
         )  # [B, C1]
         all_tokens.append(chunk_tokens)
-        
-        # Update prev_l1 for next chunk
-        prev_l1_for_chunk = l1_latents[:, j, :]
-    
-    # Concatenate all chunks
+        cur = torch.cat([cur, chunk_tokens], dim=1)
+
     block_tokens = torch.cat(all_tokens, dim=1)  # [B, C1*C2]
-    
     return block_tokens, l1_latents
 
 

@@ -112,9 +112,12 @@ def _generate_ar_reencode(
                 out = model(generated)
 
             logits = out["logits"]
-            next_logits = logits[0, -1, :].float() / temperature
-            probs = torch.softmax(next_logits, dim=-1)
-            next_token = torch.multinomial(probs, num_samples=1)
+            last = logits[0, -1, :].float()
+            if temperature <= 0:
+                next_token = last.argmax(dim=-1, keepdim=True)
+            else:
+                probs = torch.softmax(last / temperature, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1)
 
             generated_tokens.append(next_token.item())
             token_str = tokenizer.decode([next_token.item()])
@@ -263,8 +266,18 @@ def main():
     )
     parser.add_argument("--cpu", action="store_true", help="Run on CPU")
     parser.add_argument("--fp32", action="store_true", help="Use fp32 instead of fp16")
+    parser.add_argument(
+        "--greedy",
+        action="store_true",
+        help="Argmax next token (temperature 0; no top-k/top-p). Useful to separate sampling noise from model error.",
+    )
 
     args = parser.parse_args()
+    if args.greedy:
+        args.temperature = 0.0
+        args.top_k = 0
+        args.top_p = 1.0
+
     mode = _normalize_inference_mode(args.inference_mode)
 
     device = "cpu" if args.cpu else ("cuda" if torch.cuda.is_available() else "cpu")
