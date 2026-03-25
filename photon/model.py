@@ -175,6 +175,46 @@ class CausalSelfAttention(nn.Module):
         y = y.transpose(1, 2).contiguous().view(B, T, D)
         return self.out(y)
 
+    def forward_prefill(
+        self,
+        x: torch.Tensor,
+        is_causal: bool = True,
+        position_ids: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """
+        Same computation as ``forward`` but also returns the KV cache for
+        subsequent ``forward_with_kv_cache`` calls.
+        """
+        B, T, D = x.shape
+
+        qkv = self.qkv(x)
+        q, k, v = qkv.chunk(3, dim=-1)
+        q = q.view(B, T, self.n_heads, self.d_head).transpose(1, 2)
+        k = k.view(B, T, self.n_heads, self.d_head).transpose(1, 2)
+        v = v.view(B, T, self.n_heads, self.d_head).transpose(1, 2)
+
+        if self.rope is not None:
+            q = self.rope(q, position_ids)
+            k = self.rope(k, position_ids)
+
+        if self.use_sdpa:
+            y = F.scaled_dot_product_attention(
+                q, k, v, is_causal=is_causal, dropout_p=0.0,
+            )
+        else:
+            scale = 1.0 / math.sqrt(self.d_head)
+            att = torch.matmul(q, k.transpose(-2, -1)) * scale
+            if is_causal:
+                causal = torch.triu(
+                    torch.full((T, T), float("-inf"), device=x.device), diagonal=1
+                )
+                att = att + causal
+            att = F.softmax(att, dim=-1)
+            y = torch.matmul(att, v)
+
+        y = y.transpose(1, 2).contiguous().view(B, T, D)
+        return self.out(y), {"k": k, "v": v}
+
     def forward_with_kv_cache(
         self,
         x: torch.Tensor,
@@ -268,6 +308,20 @@ class TransformerBlock(nn.Module):
         x = x + self.mlp(self.ln2(x))
         return x
 
+    def forward_prefill(
+        self,
+        x: torch.Tensor,
+        is_causal: bool = True,
+        position_ids: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """Forward returning both output and KV cache for incremental decoding."""
+        attn_out, kv = self.attn.forward_prefill(
+            self.ln1(x), is_causal=is_causal, position_ids=position_ids,
+        )
+        x = x + attn_out
+        x = x + self.mlp(self.ln2(x))
+        return x, kv
+
     def forward_step(
         self,
         x: torch.Tensor,
@@ -327,6 +381,22 @@ class CtxTransformer(nn.Module):
                 x = blk(x, attn_mask=attn_mask, is_causal=is_causal, position_ids=position_ids)
         
         return self.ln_f(x)
+
+    def forward_prefill(
+        self,
+        x: torch.Tensor,
+        is_causal: bool = True,
+        position_ids: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, list]:
+        """
+        Full forward pass that also builds a KV cache compatible with
+        ``forward_step`` for subsequent incremental decoding.
+        """
+        kv_cache: list = []
+        for blk in self.blocks:
+            x, kv = blk.forward_prefill(x, is_causal=is_causal, position_ids=position_ids)
+            kv_cache.append(kv)
+        return self.ln_f(x), kv_cache
 
     def init_kv_cache(self) -> list:
         return [None for _ in range(len(self.blocks))]
