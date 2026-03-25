@@ -21,6 +21,30 @@ from .model import PhotonLM
 from .config import PhotonConfig
 
 
+def _prev_l1_after_prefix(model: PhotonLM, cur_tokens: torch.Tensor, cfg: PhotonConfig) -> torch.Tensor:
+    """
+    Encode ``cur_tokens`` and return the L1 vector for the **last real** C1 window.
+
+    ``encode`` requires length divisible by ``C1`` (for L1) and L1 length divisible
+    by ``C2`` (for ``enc_chunk2``). After each intra-block chunk, token length is
+    ``C1``-aligned but often **not** ``C1*C2``-aligned, so we right-pad with
+    ``pad_token_id`` before ``encode``, then take ``x1[:, n_real - 1]`` where
+    ``n_real = T // C1`` — **not** ``x1[:, -1]``, which would summarize padding.
+    """
+    T = cur_tokens.size(1)
+    block = cfg.C1 * cfg.C2
+    if T % cfg.C1 != 0:
+        raise ValueError(f"cur_tokens length {T} must be divisible by C1 ({cfg.C1})")
+    if T % block != 0:
+        pad = block - (T % block)
+        padded = F.pad(cur_tokens, (0, pad), value=cfg.pad_token_id or 0)
+    else:
+        padded = cur_tokens
+    x1, _ = model.encode(padded)
+    n_l1_real = T // cfg.C1
+    return x1[:, n_l1_real - 1, :]
+
+
 def _streaming_l2_state_from_full_encode(
     model: PhotonLM,
     token_ids: torch.Tensor,
@@ -144,9 +168,8 @@ def generate_one_block(
 
        Training never feeds ``dec_conv1`` with L2-predicted latents between chunks; it
        uses ``x1`` from a bottom-up encode of the **true** prefix. Here we **re-encode**
-       ``cur_tokens`` (extended after each chunk) and take ``x1[:, -1]`` so the
-       conditioner matches the **generated** prefix, not ``l1_latents[:, j]`` from the
-       L2 head (which was sampled without seeing those tokens).
+       ``cur_tokens`` (extended after each chunk). Sequences are padded to ``C1*C2`` for
+       ``encode`` when needed; the conditioner is the last **real** L1 slot, not padding.
 
     Args:
         prev_l2: [B, D] L2 state for this block's L2 decoder.
@@ -172,8 +195,7 @@ def generate_one_block(
     cur = cur_tokens.clone()
 
     for _j in range(cfg.C2):
-        x1, _ = model.encode(cur)
-        prev_l1_for_chunk = x1[:, -1, :]  # same role as x1[:, m-1] for next chunk m
+        prev_l1_for_chunk = _prev_l1_after_prefix(model, cur, cfg)
         chunk_tokens = generate_token_chunk(
             model=model,
             prev_l1=prev_l1_for_chunk,
